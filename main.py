@@ -123,7 +123,9 @@ def map_to_moonraker_format():
             "print_duration": print_duration,
             "progress": progress,
             "state": klipper_state,
-            "message": ""
+            "message": "",
+            "filament_used": 0.0,
+            "info": {"total_layer": None, "current_layer": None}
         },
         "display_status": {
             "progress": progress
@@ -133,7 +135,7 @@ def map_to_moonraker_format():
             "available_sensors": ["extruder", "heater_bed"]
         },
         "virtual_sdcard": {
-            "progress": progress,
+            "progress": progress if progress is not None else 0.0,
             "is_active": klipper_state == "printing",
             "file_position": 0
         },
@@ -287,6 +289,9 @@ async def get_printer_info():
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
+            "config_file": "/config/printer.cfg",
+            "klipper_path": "/opt/klipper",
+            "moonraker_path": "/opt/moonraker",
             "cpu_info": "Allwinner R528 Proxy"
         }
     }
@@ -295,7 +300,7 @@ async def get_printer_info():
 async def list_printer_objects():
     return {
         "result": {
-            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks", "gcode_move", "fan"]
+            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks", "gcode_move", "fan", "_OBICO_LAYER_CHANGE", "TIMELAPSE_TAKE_FRAME"]
         }
     }
 
@@ -539,21 +544,6 @@ async def print_start():
 async def print_stop():
     return {"result": "ok"}
 
-@app.get("/server/webcams/get")
-async def get_webcam(name: str = None):
-    return {
-        "result": {
-            "name": name or "Elegoo Camera",
-            "service": "mjpeg",
-            "target_fps": 15,
-            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
-            "flip_horizontal": False,
-            "flip_vertical": False,
-            "rotation": 0
-        }
-    }
-
 @app.get("/server/authorization/check")
 async def check_auth():
     return {"result": {"authenticated": True}}
@@ -610,7 +600,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": map_to_moonraker_format()["print_stats"]["state"]
+                            "state": map_to_moonraker_format()["print_stats"]["state"],
+                            "state_message": "Printer is ready",
+                            "hostname": "elegoo-cc2",
+                            "software_version": "v0.12.0-proxy",
+                            "config_file": "/config/printer.cfg",
+                            "klipper_path": "/opt/klipper",
+                            "moonraker_path": "/opt/moonraker",
+                            "cpu_info": "Allwinner R528 Proxy"
                         },
                         "id": msg_id
                     }))
