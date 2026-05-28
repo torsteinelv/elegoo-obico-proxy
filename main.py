@@ -356,35 +356,34 @@ async def get_metadata(filename: str = ""):
 @app.get("/server/files/list")
 async def get_files_list():
     return {"result": []}
-
-def _extract_jpeg_frame(url: str, timeout: int = 5) -> bytes | None:
-    """Kobler til strømmen, kaster gamle bufrede bilder, og henter et garantert ferskt bilde."""
+    
+def _extract_jpeg_frame(url: str, timeout: int = 8) -> bytes | None:
+    """Kobler til strømmen, lar linsen varme opp i 1.5 sek, og klipper så et rykende ferskt bilde."""
     try:
-        # Bli enige med serveren om at vi skal lukke tilkoblingen pent etterpå
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = b""
-            frames_skipped = 0
             
-            for _ in range(200): # Leser litt dypere inn i strømmen
+            # 1. ANTI-SPØKELSE: Les og kast all data i 1.5 sekunder
+            # Dette gir det fysiske kameraet tid til å våkne og dytte ut nye bilder
+            flush_end_time = time.time() + 1.5
+            while time.time() < flush_end_time:
+                response.read(4096)
+                
+            # 2. FANG BILDET: Nå vet vi at dataene som kommer utelukkende er ferske!
+            data = b""
+            for _ in range(150): 
                 chunk = response.read(4096)
                 if not chunk:
                     break
                 data += chunk
                 
-                # Finn start (FF D8) og slutt (FF D9) på JPEG
+                # Finn start og slutt på et helt JPEG-bilde
                 start = data.find(b"\xff\xd8")
                 if start != -1:
                     end = data.find(b"\xff\xd9", start)
                     if end != -1:
-                        if frames_skipped < 2:
-                            # 🗑️ KAST DE 2 FØRSTE BILDENE: De er ofte gamle spøkelsesbilder
-                            data = data[end+2:]
-                            frames_skipped += 1
-                            continue
-                        else:
-                            # 📸 RETURNER DET 3. BILDET: Dette kommer direkte fra linsen NÅ!
-                            return data[start:end+2]
+                        return data[start:end+2]
+                        
     except Exception as e:
         logger.error(f"Klarte ikke å hente ferskt snapshot: {e}")
     return None
