@@ -7,6 +7,7 @@ import secrets
 import logging
 import asyncio
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 import paho.mqtt.client as mqtt
 import uvicorn
@@ -19,8 +20,6 @@ logger = logging.getLogger("ElegooObicoProxy")
 PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
 SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2ABCD123456789")
 ACCESS_CODE = os.getenv("ACCESS_CODE", "123456")
-
-app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 
 # Global printer state & event loop reference
 elegoo_status_cache = {}
@@ -39,12 +38,16 @@ REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
 
-@app.on_event("startup")
-async def startup_event():
-    """Captures the actual, live running event loop used by Uvicorn."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Captures the live running event loop and handles startup/shutdown securely."""
     global fastapi_loop
     fastapi_loop = asyncio.get_running_loop()
-    logger.info("Successfully captured the live Uvicorn event loop for background threads.")
+    logger.info("Successfully captured the live Uvicorn event loop via lifespan handler.")
+    yield
+    logger.info("Shutting down application lifespan.")
+
+app = FastAPI(title="Elegoo CC2 to Moonraker Proxy", lifespan=lifespan)
 
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
@@ -210,7 +213,7 @@ def on_message(client, userdata, msg):
         method = payload.get("method")
         result_data = payload.get("result", {})
         
-        # Sjekk terminal-svar
+        # Capture terminal reply
         if method not in [1002, 1001] and "api_response" in topic:
             gcode_text = ""
             if isinstance(result_data, dict) and "ack" in result_data:
@@ -223,7 +226,7 @@ def on_message(client, userdata, msg):
             if gcode_text and fastapi_loop:
                 asyncio.run_coroutine_threadsafe(broadcast_gcode_response(gcode_text), fastapi_loop)
             
-        # Telemetri / Statusoppdatering
+        # Telemetry / Status update
         if result_data and method in [1002, 1001]:
             if method == 1002 or not elegoo_status_cache:
                 elegoo_status_cache = result_data
@@ -271,7 +274,7 @@ async def get_server_info():
 async def get_printer_info():
     return {
         "result": {
-            "state": map_to_moonraker_format()["print_stats"]["state"],
+            "state": "ready",  # Fixed to "ready" to prevent Obico initialization loops
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
@@ -422,7 +425,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": map_to_moonraker_format()["print_stats"]["state"]
+                            "state": "ready"
                         },
                         "id": msg_id
                     }))
