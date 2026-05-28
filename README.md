@@ -122,8 +122,8 @@ We invite contributions to reverse-engineer the Elegoo file transfer protocol to
 
 ## Acknowledgments & Credits
 
-This project stands on the shoulders of giants. Special thanks to the open-source community and projects that made this proxy possible:
+This project stands on the shoulders of giants. Special thanks to the open-source creators who made this proxy possible:
 
-- **[Moonraker-Obico](https://github.com/TheSpaghettiDetective/moonraker-obico):** For the official client-side logic translating Klipper events into the Obico cloud/self-hosted ecosystem.
-- **Home Assistant Elegoo Community Research:** For the vital groundwork in reverse-engineering the Elegoo CC2/TinaLinux MQTT packet structures and telemetry topics.
-- **[Klipper](https://github.com/Klipper3d/klipper) & [Moonraker](https://github.com/Arksine/moonraker):** For defining the standard open 3D printing APIs that we emulate here.
+- **[danielcherubini/elegoo-homeassistant](https://github.com/danielcherubini/elegoo-homeassistant):** For the stellar reverse-engineering work on the Elegoo CC2 (Centauri Carbon 2) MQTT architecture, client registration protocol, and packet structure mappings.
+- **[Moonraker-Obico](https://github.com/TheSpaghettiDetective/moonraker-obico):** For the official client daemon linking Klipper API standards to the Obico smart monitoring framework.
+- **[Klipper](https://github.com/Klipper3d/klipper) & [Moonraker](https://github.com/Arksine/moonraker):** For compiling the robust open-source 3D printing ecosystem APIs emulated by this proxy.
