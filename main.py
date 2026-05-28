@@ -104,6 +104,20 @@ def map_to_moonraker_format():
         },
         "display_status": {
             "progress": progress
+        },
+        # --- NYE TING OBICO FORVENTER ---
+        "heaters": {
+            "available_heaters": ["extruder", "heater_bed"],
+            "available_sensors": ["extruder", "heater_bed"]
+        },
+        "virtual_sdcard": {
+            "progress": progress,
+            "is_active": klipper_state == "printing",
+            "file_position": 0
+        },
+        "webhooks": {
+            "state": "ready",
+            "state_message": "Printer is ready"
         }
     }
 
@@ -221,8 +235,27 @@ async def get_printer_info():
         }
     }
 
+@app.get("/printer/objects/list")
+async def list_printer_objects():
+    """Tells Obico which Klipper modules are available."""
+    return {
+        "result": {
+            "objects": [
+                "toolhead",
+                "extruder",
+                "heater_bed",
+                "print_stats",
+                "display_status",
+                "heaters",
+                "virtual_sdcard",
+                "webhooks"
+            ]
+        }
+    }
+
 @app.get("/printer/objects/query")
 async def query_printer_objects():
+    """Returns the full status object requested by Obico."""
     return {
         "result": {
             "status": map_to_moonraker_format()
