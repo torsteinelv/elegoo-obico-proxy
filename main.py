@@ -346,6 +346,10 @@ async def list_webcams():
         }
     }
 
+@app.get("/machine/device_power/devices")
+async def get_device_power_devices():
+    return {"result": []}
+
 @app.get("/server/files/metadata")
 async def get_metadata(filename: str = ""):
     return {
@@ -363,7 +367,13 @@ async def get_files_list():
 
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
-    raise HTTPException(status_code=404, detail="Item not found")
+    return {
+        "result": {
+            "namespace": namespace or "",
+            "key": key or "",
+            "value": None
+        }
+    }
 
 @app.post("/server/database/item")
 async def post_database_item(request: Request):
