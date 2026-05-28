@@ -3,10 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install git and tools needed for building
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # Clone the official Obico client
 RUN git clone https://github.com/TheSpaghettiDetective/moonraker-obico.git /app/moonraker-obico

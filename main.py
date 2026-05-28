@@ -7,6 +7,8 @@ import secrets
 import logging
 import asyncio
 import threading
+from contextlib import asynccontextmanager
+from threading import Lock
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 import paho.mqtt.client as mqtt
 import uvicorn
@@ -24,12 +26,15 @@ app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 
 # Global printer state (cache)
 elegoo_status_cache = {}
+elegoo_status_lock = Lock()
 active_websocket_clients = set()
+active_ws_lock = Lock()
 mqtt_client_connected = False
+fastapi_loop = None
 
 # Generate valid IDs matching Elegoo's official web interface format
 timestamp_hex = format(int(time.time() * 1000), "x")[-5:]
-random_hex = format(secrets.randbelow(4096), "x")
+random_hex = secrets.token_hex(3)
 CLIENT_ID = f"0cli{timestamp_hex}{random_hex}"[:10]
 
 uuid_part = "".join(format(secrets.randbelow(16) if c == "x" else (secrets.randbelow(4) + 8), "x") for c in "xxxxxxxxxxxxxxxx")
@@ -61,24 +66,28 @@ def map_to_moonraker_format():
     try:
         progress_val = float(progress_raw)
         progress = progress_val / 100.0 if progress_val > 1.0 else progress_val
-    except:
+    except Exception:
         progress = 0.0
 
     el_status = elegoo_status_cache.get("machine_status", {}).get("status", 1)
     el_sub_status = elegoo_status_cache.get("machine_status", {}).get("sub_status", 0)
-    
-    klipper_state = "ready"
+
+    klipper_state = "standby"
     if el_status == 2:
-        if el_sub_status in [2502, 2505]:
+        if el_sub_status in [2501, 2502, 2503, 2505]:
             klipper_state = "paused"
         elif el_sub_status == 2077:
             klipper_state = "complete"
         elif el_sub_status == 2504:
             klipper_state = "cancelled"
+        elif el_sub_status == 2401:
+            klipper_state = "printing"
         else:
             klipper_state = "printing"
-    elif el_status == 1:
-        klipper_state = "standby"
+    elif el_status == 3:
+        klipper_state = "printing"
+    elif el_status == 4:
+        klipper_state = "printing"
 
     # Robust filename parsing
     filename = elegoo_status_cache.get("print_status", {}).get("filename", "")
@@ -88,15 +97,15 @@ def map_to_moonraker_format():
     print_duration = elegoo_status_cache.get("print_status", {}).get("print_duration", 0)
     remaining = elegoo_status_cache.get("print_status", {}).get("remaining_time_sec", 0)
 
+    gm = elegoo_status_cache.get("gcode_move_inf", {})
+    gcode_position = gm.get("gcode_position")
+    if not gcode_position:
+        gcode_position = [gm.get("x", 0.0), gm.get("y", 0.0), gm.get("z", 0.0), gm.get("e", 0.0)]
+
     return {
         "toolhead": {
             "homed_axes": elegoo_status_cache.get("toolhead", {}).get("homed_axes", "xyz"),
-            "position": [
-                elegoo_status_cache.get("gcode_move_inf", {}).get("x", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("y", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("z", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("e", 0.0)
-            ]
+            "position": gcode_position
         },
         "extruder": {
             "temperature": ext_temp,
@@ -129,27 +138,58 @@ def map_to_moonraker_format():
         "webhooks": {
             "state": "ready",
             "state_message": "Printer is ready"
+        },
+        "gcode_move": {
+            "speed_factor": 1.0,
+            "extrude_factor": 1.0,
+            "gcode_position": gcode_position
+        },
+        "fan": {
+            "speed": 0.0
         }
     }
 
 async def broadcast_status_to_websockets():
-    """Broadcasting updated Moonraker status to all open WebSockets for Obico."""
-    if not active_websocket_clients:
+    """Broadcasting updated Moonraker status with valid eventtime to all open WebSockets."""
+    with active_ws_lock:
+        clients = list(active_websocket_clients)
+    if not clients:
         return
-    
-    status_data = map_to_moonraker_format()
+
+    with elegoo_status_lock:
+        status_data = map_to_moonraker_format()
     notification = {
         "jsonrpc": "2.0",
         "method": "notify_status_update",
         "params": [status_data]
     }
-    
+
     payload = json.dumps(notification)
-    for ws in list(active_websocket_clients):
+    for ws in list(clients):
         try:
             await ws.send_text(payload)
         except Exception:
-            active_websocket_clients.remove(ws)
+            with active_ws_lock:
+                active_websocket_clients.discard(ws)
+
+async def broadcast_gcode_response(text: str):
+    """Broadcasting G-code terminal text replies back to the Obico console interface."""
+    with active_ws_lock:
+        clients = list(active_websocket_clients)
+    if not clients:
+        return
+    notification = {
+        "jsonrpc": "2.0",
+        "method": "notify_gcode_response",
+        "params": [text]
+    }
+    payload = json.dumps(notification)
+    for ws in list(clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            with active_ws_lock:
+                active_websocket_clients.discard(ws)
 
 # MQTT Callbacks
 def on_connect(client, userdata, flags, rc):
@@ -189,13 +229,19 @@ def on_message(client, userdata, msg):
         if not result_data:
             return
             
-        if payload.get("method") == 1002 or not elegoo_status_cache:
-            elegoo_status_cache = result_data
-            logger.info("Full status report received and cached.")
-        else:
-            deep_merge(elegoo_status_cache, result_data)
-        
-        asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
+        method = payload.get("method")
+        # Telemetry / Status update
+        if result_data and method in [1002, 1001]:
+            if method == 1002 or not elegoo_status_cache:
+                with elegoo_status_lock:
+                    elegoo_status_cache = result_data
+                logger.info("Full status report received and cached.")
+            else:
+                with elegoo_status_lock:
+                    deep_merge(elegoo_status_cache, result_data)
+
+            if fastapi_loop:
+                asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
 
 def mqtt_heartbeat_loop(mqtt_client):
     while True:
@@ -247,7 +293,7 @@ async def get_printer_info():
 async def list_printer_objects():
     return {
         "result": {
-            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks"]
+            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks", "gcode_move", "fan"]
         }
     }
 
@@ -276,7 +322,10 @@ async def list_webcams():
         }
     }
 
-# --- METADATA & FILES (Stopper feil i Obico) ---
+@app.get("/machine/device_power/devices")
+async def get_device_power_devices():
+    return {"result": []}
+
 @app.get("/server/files/metadata")
 async def get_metadata(filename: str = ""):
     logger.info(f"Obico requested metadata for {filename}")
@@ -296,7 +345,13 @@ async def get_files_list():
 # --- DATABASE ROUTE ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
-    raise HTTPException(status_code=404, detail="Item not found")
+    return {
+        "result": {
+            "namespace": namespace or "",
+            "key": key or "",
+            "value": None
+        }
+    }
 
 @app.post("/server/database/item")
 async def post_database_item(request: Request):
@@ -357,12 +412,25 @@ async def print_cancel():
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
-# WebSocket Endpoint for Obico RPC communication
+@app.post("/printer/emergency_stop")
+async def emergency_stop():
+    logger.warning("Emergency stop requested!")
+    return {"result": "ok"}
+
+@app.get("/server/history/list")
+async def get_history(limit: int = 1, order: str = "desc"):
+    return {"result": {"jobs": []}}
+
+@app.get("/machine/update/status")
+async def get_update_status(refresh: str = "false"):
+    return {"result": {"version_info": []}}
+
 @app.websocket("/websocket")
 @app.websocket("/server/websocket")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    active_websocket_clients.add(websocket)
+    with active_ws_lock:
+        active_websocket_clients.add(websocket)
     logger.info("Obico client connected to proxy WebSocket.")
     
     initial_status = map_to_moonraker_format()
@@ -404,12 +472,32 @@ async def websocket_endpoint(websocket: WebSocket):
                         },
                         "id": msg_id
                     }))
+                elif method == "printer.gcode.script":
+                    script = msg.get("params", {}).get("script", "")
+                    if script:
+                        logger.info(f"Obico sent G-code via WebSocket: {script}")
+                        cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
+                        mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+                    await websocket.send_text(json.dumps({
+                        "jsonrpc": "2.0",
+                        "result": "ok",
+                        "id": msg_id
+                    }))
+                elif method in ["connection.register_remote_method", "server.connection.identify"]:
+                    await websocket.send_text(json.dumps({
+                        "jsonrpc": "2.0",
+                        "result": None,
+                        "id": msg_id
+                    }))
             except Exception:
-                pass
+                logger.exception("Error handling WebSocket message")
     except WebSocketDisconnect:
         logger.info("Obico client disconnected from proxy WebSocket.")
+    except Exception:
+        logger.exception("Unexpected error in WebSocket handler")
     finally:
-        active_websocket_clients.remove(websocket)
+        with active_ws_lock:
+            active_websocket_clients.discard(websocket)
 
 if __name__ == "__main__":
     fastapi_loop = asyncio.get_event_loop()
