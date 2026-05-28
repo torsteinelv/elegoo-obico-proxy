@@ -542,7 +542,7 @@ async def get_webcam(name: str = None):
             "service": "mjpeg",
             "target_fps": 15,
             "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <--- OPPDATERT! Denne tvinger trafikken gjennom proxyen din
             "flip_horizontal": False,
             "flip_vertical": False,
             "rotation": 0
