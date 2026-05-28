@@ -489,9 +489,17 @@ async def camera_stream():
     """Proxy the Elegoo camera MJPEG stream."""
     url = f"http://{PRINTER_IP}:8080/?action=stream"
     try:
-        resp = await fastapi_loop.run_in_executor(None, _fetch, url)
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(None, _fetch, url)
+        reader = resp
+        async def stream_iter():
+            while True:
+                chunk = await loop.run_in_executor(None, reader.read, 4096)
+                if not chunk:
+                    break
+                yield chunk
         return StreamingResponse(
-            iter(lambda: fastapi_loop.run_in_executor(None, resp.read, 4096), b""),
+            stream_iter(),
             media_type=resp.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         )
     except Exception as e:
@@ -503,8 +511,9 @@ async def camera_snapshot():
     """Proxy the Elegoo camera snapshot."""
     url = f"http://{PRINTER_IP}:8080/?action=snapshot"
     try:
-        resp = await fastapi_loop.run_in_executor(None, _fetch, url)
-        data = await fastapi_loop.run_in_executor(None, resp.read)
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(None, _fetch, url)
+        data = await loop.run_in_executor(None, resp.read)
         return Response(
             content=data,
             media_type=resp.headers.get("Content-Type", "image/jpeg")
