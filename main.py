@@ -105,7 +105,6 @@ def map_to_moonraker_format():
         "display_status": {
             "progress": progress
         },
-        # --- NYE TING OBICO FORVENTER ---
         "heaters": {
             "available_heaters": ["extruder", "heater_bed"],
             "available_sensors": ["extruder", "heater_bed"]
@@ -261,6 +260,13 @@ async def query_printer_objects():
             "status": map_to_moonraker_format()
         }
     }
+
+# --- NYTT ENDEPUNKT FOR Å FORHINDRE KRASJ ---
+@app.post("/server/database/item")
+async def post_database_item(data: dict):
+    """Dummy endpoint that accepts Obico's printer settings and returns success."""
+    logger.info(f"Obico saved a database item to proxy: {data}")
+    return {"result": data}
 
 # Control Endpoints for Obico
 @app.post("/printer/print/pause")
