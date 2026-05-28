@@ -53,8 +53,16 @@ def map_to_moonraker_format():
     bed_temp = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
     bed_target = elegoo_status_cache.get("heater_bed", {}).get("target", 0.0)
     
+    # Robust progress parsing
     progress_raw = elegoo_status_cache.get("machine_status", {}).get("progress", 0)
-    progress = float(progress_raw) / 100.0
+    if not progress_raw:
+        progress_raw = elegoo_status_cache.get("print_status", {}).get("progress", 0)
+    
+    try:
+        progress_val = float(progress_raw)
+        progress = progress_val / 100.0 if progress_val > 1.0 else progress_val
+    except:
+        progress = 0.0
 
     el_status = elegoo_status_cache.get("machine_status", {}).get("status", 1)
     el_sub_status = elegoo_status_cache.get("machine_status", {}).get("sub_status", 0)
@@ -72,7 +80,11 @@ def map_to_moonraker_format():
     elif el_status == 1:
         klipper_state = "standby"
 
+    # Robust filename parsing
     filename = elegoo_status_cache.get("print_status", {}).get("filename", "")
+    if not filename:
+        filename = elegoo_status_cache.get("machine_status", {}).get("filename", "")
+
     print_duration = elegoo_status_cache.get("print_status", {}).get("print_duration", 0)
     remaining = elegoo_status_cache.get("print_status", {}).get("remaining_time_sec", 0)
 
@@ -204,12 +216,10 @@ mqtt_client.on_message = on_message
 
 @app.get("/access/api_key")
 async def get_api_key():
-    """Dummy endpoint to satisfy Obico's API key check."""
     return {"result": "elegoo-obico-proxy-dummy-key"}
 
 @app.get("/server/info")
 async def get_server_info():
-    """Tells Obico that Moonraker and Klipper are fully connected and ready."""
     return {
         "result": {
             "state": "ready",
@@ -223,7 +233,6 @@ async def get_server_info():
 
 @app.get("/printer/info")
 async def get_printer_info():
-    """Returns Klipper status info."""
     return {
         "result": {
             "state": map_to_moonraker_format()["print_stats"]["state"],
@@ -236,35 +245,19 @@ async def get_printer_info():
 
 @app.get("/printer/objects/list")
 async def list_printer_objects():
-    """Tells Obico which Klipper modules are available."""
     return {
         "result": {
-            "objects": [
-                "toolhead",
-                "extruder",
-                "heater_bed",
-                "print_stats",
-                "display_status",
-                "heaters",
-                "virtual_sdcard",
-                "webhooks"
-            ]
+            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks"]
         }
     }
 
 @app.get("/printer/objects/query")
 async def query_printer_objects():
-    """Returns the full status object requested by Obico."""
-    return {
-        "result": {
-            "status": map_to_moonraker_format()
-        }
-    }
+    return {"result": {"status": map_to_moonraker_format()}}
 
-# --- NEW WEBCAM ENDPOINT TO TRANSMIT STREAM TO OBICO ---
+# --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
-    """Tells Obico where to find the Elegoo printer's native webcam stream."""
     logger.info("Obico requested webcam list. Routing to Elegoo native stream...")
     return {
         "result": {
@@ -272,8 +265,7 @@ async def list_webcams():
                 {
                     "name": "Elegoo Camera",
                     "service": "mjpeg",
-                    "target_fps": 25,
-                    # NOTE: If your Home Assistant config uses a different port or path, you can edit these strings below!
+                    "target_fps": 15,
                     "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
                     "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
                     "flip_horizontal": False,
@@ -284,15 +276,30 @@ async def list_webcams():
         }
     }
 
-# --- DATABASE ROUTE TO PREVENT 422/405 ERRORS ---
+# --- METADATA & FILES (Stopper feil i Obico) ---
+@app.get("/server/files/metadata")
+async def get_metadata(filename: str = ""):
+    logger.info(f"Obico requested metadata for {filename}")
+    return {
+        "result": {
+            "filename": filename,
+            "size": 1000000,
+            "modified": time.time(),
+            "thumbnails": []
+        }
+    }
+
+@app.get("/server/files/list")
+async def get_files_list():
+    return {"result": []}
+
+# --- DATABASE ROUTE ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
-    """Returns 404 cleanly when Obico checks for missing settings (like webcams)."""
-    raise HTTPException(status_code=404, detail="Item not found in simulated database")
+    raise HTTPException(status_code=404, detail="Item not found")
 
 @app.post("/server/database/item")
 async def post_database_item(request: Request):
-    """Dynamically accepts parameters via Query, Form, or JSON to avoid 422 errors."""
     params = dict(request.query_params)
     try:
         body = await request.json()
@@ -310,24 +317,40 @@ async def post_database_item(request: Request):
         }
     }
 
+# --- NY RUTE: G-KODE MOTOR FOR TERMINAL OG KONTROLLER ---
+@app.post("/printer/gcode/script")
+async def execute_gcode(request: Request):
+    try:
+        body = await request.json()
+        script = body.get("script", "")
+    except Exception:
+        script = ""
+        
+    if script:
+        logger.info(f"Obico sent G-code command: {script}")
+        # Standard G-kode wrapper for MQTT Klipper API
+        cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
+        mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+    return {"result": "ok"}
+
 # Control Endpoints for Obico
 @app.post("/printer/print/pause")
 async def print_pause():
-    logger.info("Received PAUSE command from Obico. Forwarding to printer...")
+    logger.info("Received PAUSE command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1021, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/resume")
 async def print_resume():
-    logger.info("Received RESUME command from Obico. Forwarding to printer...")
+    logger.info("Received RESUME command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/cancel")
 async def print_cancel():
-    logger.info("Received CANCEL/STOP command from Obico. Canceling print...")
+    logger.info("Received CANCEL command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
