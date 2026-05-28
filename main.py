@@ -16,10 +16,10 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("ElegooObicoProxy")
 
-# Fetch Environment Variables
-PRINTER_IP = os.getenv("PRINTER_IP", "10.10.11.41")
-SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "F01DUH8HZVBY031")
-ACCESS_CODE = os.getenv("ACCESS_CODE", "BPaTKN")
+# Fetch Environment Variables - Safe, generic placeholders as defaults
+PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
+SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2XXXXXXXXXXXX")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 
 # Global printer state & event loop reference
 elegoo_status_cache = {}
