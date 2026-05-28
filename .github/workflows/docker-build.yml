@@ -45,7 +45,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ status.meta.outputs.tags }}
-          labels: ${{ status.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}   # <-- Endret fra status til steps!
+          labels: ${{ steps.meta.outputs.labels }} # <-- Endret fra status til steps!
           cache-from: type=gha
           cache-to: type=gha,mode=max
