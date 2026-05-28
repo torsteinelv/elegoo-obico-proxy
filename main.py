@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from threading import Lock
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
+import urllib.request
 import paho.mqtt.client as mqtt
 import uvicorn
 
@@ -305,7 +306,7 @@ async def query_printer_objects():
 # --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
-    logger.info("Obico requested webcam list. Routing directly to Elegoo native stream...")
+    logger.info("Obico requested webcam list. Routing snapshot through proxy clipper...")
     return {
         "result": {
             "webcams": [{
@@ -313,11 +314,26 @@ async def list_webcams():
                 "service": "mjpeg",
                 "target_fps": 15,
                 "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-                "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+                "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
                 "flip_horizontal": False,
                 "flip_vertical": False,
                 "rotation": 0
             }]
+        }
+    }
+
+@app.get("/server/webcams/get")
+async def get_webcam(name: str = None):
+    return {
+        "result": {
+            "name": name or "Elegoo Camera",
+            "service": "mjpeg",
+            "target_fps": 15,
+            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
+            "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
+            "flip_horizontal": False,
+            "flip_vertical": False,
+            "rotation": 0
         }
     }
 
@@ -340,6 +356,41 @@ async def get_metadata(filename: str = ""):
 @app.get("/server/files/list")
 async def get_files_list():
     return {"result": []}
+
+Python
+def _extract_jpeg_frame(url: str, timeout: int = 5) -> bytes | None:
+    """Kobler til MJPEG-strømmen, klipper ut ETT JPEG-bilde, og lukker tilkoblingen."""
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = b""
+            # Leser inn litt data for å finne ett komplett bilde
+            for _ in range(100): 
+                chunk = response.read(4096)
+                if not chunk:
+                    break
+                data += chunk
+                
+                # Se etter JPEG start (FF D8) og slutt (FF D9)
+                start = data.find(b"\xff\xd8")
+                if start != -1:
+                    end = data.find(b"\xff\xd9", start)
+                    if end != -1:
+                        return data[start:end+2]
+    except Exception as e:
+        logger.error(f"Klarte ikke å hente snapshot fra strømmen: {e}")
+    return None
+
+@app.get("/camera/snapshot")
+async def camera_snapshot():
+    """Gir Obico et feilfritt snapshot hentet direkte fra videostrømmen."""
+    url = f"http://{PRINTER_IP}:8080/?action=stream"
+    loop = asyncio.get_running_loop()
+    jpeg = await loop.run_in_executor(None, _extract_jpeg_frame, url, 5)
+    
+    if jpeg:
+        return Response(content=jpeg, media_type="image/jpeg")
+    raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
 
 # --- DATABASE ROUTE ---
 @app.get("/server/database/item")
