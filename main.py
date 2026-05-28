@@ -15,10 +15,10 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("ElegooObicoProxy")
 
-# Fetch Environment Variables - Sikret med generiske fallbacks for GitHub
+# Fetch Environment Variables
 PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
-SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2XXXXXXXXXXXX")
-ACCESS_CODE = os.getenv("ACCESS_CODE", "")
+SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2ABCD123456789")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "123456")
 
 app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 
@@ -330,6 +330,7 @@ async def execute_gcode(request: Request, script: str = None):
             
     if script:
         logger.info(f"Obico sent G-code command: {script}")
+        # Standard G-kode wrapper for MQTT Klipper API
         cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
         mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
