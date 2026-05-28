@@ -8,7 +8,7 @@ import logging
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from threading import Lock
+from threading import RLock  # Bruker RLock for å forhindre deadlocks ved raske kall
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
 import urllib.request
@@ -28,9 +28,9 @@ app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 
 # Global printer state (cache)
 elegoo_status_cache = {}
-elegoo_status_lock = Lock()
+elegoo_status_lock = RLock()
 active_websocket_clients = set()
-active_ws_lock = Lock()
+active_ws_lock = RLock()
 mqtt_client_connected = False
 fastapi_loop = None
 
@@ -45,29 +45,6 @@ REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
 
-
-@app.get("/camera/stream")
-async def camera_stream():
-    """Tunnelerer live MJPEG-videostrømmen fra skriveren direkte til Obico."""
-    url = f"http://{PRINTER_IP}:8080/?action=stream"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        # Åpner strømmen fra skriveren
-        response = urllib.request.urlopen(req, timeout=10)
-        content_type = response.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=boundarydonotcross")
-        
-        # Generator som leser rådata i biter og videresender dem umiddelbart
-        def iter_stream():
-            while True:
-                chunk = response.read(4096)
-                if not chunk:
-                    break
-                yield chunk
-                
-        return StreamingResponse(iter_stream(), media_type=content_type)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Klarte ikke å viderekoble videostrøm: {e}")
-
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
     for key, value in update.items():
@@ -80,7 +57,7 @@ def map_to_moonraker_format():
     """Translates Elegoo's internal status cache to Moonraker's Klipper format."""
     ext_temp = elegoo_status_cache.get("extruder", {}).get("temperature", 0.0)
     ext_target = elegoo_status_cache.get("extruder", {}).get("target", 0.0)
-    bed_temp = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
+    text_0 = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
     bed_target = elegoo_status_cache.get("heater_bed", {}).get("target", 0.0)
     
     # Robust progress parsing
@@ -137,7 +114,7 @@ def map_to_moonraker_format():
             "target": ext_target
         },
         "heater_bed": {
-            "temperature": bed_temp,
+            "temperature": text_0,
             "target": bed_target
         },
         "print_stats": {
@@ -254,7 +231,7 @@ def on_message(client, userdata, msg):
         if not result_data:
             return
             
-        # 🔥 FIX: Fjernet den strenge sjekken på [1002, 1001] slik at delta-oppdateringer (metode 6000) slipper igjennom!
+        # Slipper igjennom alle meldinger (inkludert metode 6000 for temperaturer)
         if payload.get("method") == 1002 or not elegoo_status_cache:
             with elegoo_status_lock:
                 elegoo_status_cache = result_data
@@ -302,9 +279,11 @@ async def get_server_info():
 
 @app.get("/printer/info")
 async def get_printer_info():
+    with elegoo_status_lock:
+        state = map_to_moonraker_format()["print_stats"]["state"]
     return {
         "result": {
-            "state": map_to_moonraker_format()["print_stats"]["state"],
+            "state": state,
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
@@ -332,9 +311,11 @@ async def list_printer_objects():
 
 @app.get("/printer/objects/query")
 async def query_printer_objects():
-    return {"result": {"status": map_to_moonraker_format()}}
+    with elegoo_status_lock:
+        status = map_to_moonraker_format()
+    return {"result": {"status": status}}
 
-# --- WEBCAM ENDPOINT ---
+# --- WEBCAM ENDPOINTS (MJPEG Adaptive omgår Janus fullstendig) ---
 @app.get("/server/webcams/list")
 async def list_webcams():
     logger.info("Obico requested webcam list. Routing stream and snapshot through proxy...")
@@ -342,14 +323,29 @@ async def list_webcams():
         "result": {
             "webcams": [{
                 "name": "Elegoo Camera",
-                "service": "mjpeg",
+                "service": "mjpeg_adaptive",
                 "target_fps": 15,
-                "stream_url": "http://127.0.0.1:7125/camera/stream",      # <-- OPPDATERT!
-                "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
+                "stream_url": "http://127.0.0.1:7125/camera/stream",
+                "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",
                 "flip_horizontal": False,
                 "flip_vertical": False,
                 "rotation": 0
             }]
+        }
+    }
+
+@app.get("/server/webcams/get")
+async def get_webcam(name: str = None):
+    return {
+        "result": {
+            "name": name or "Elegoo Camera",
+            "service": "mjpeg_adaptive",
+            "target_fps": 15,
+            "stream_url": "http://127.0.0.1:7125/camera/stream",
+            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",
+            "flip_horizontal": False,
+            "flip_vertical": False,
+            "rotation": 0
         }
     }
 
@@ -428,6 +424,31 @@ async def camera_snapshot():
             }
         )
     raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
+
+@app.get("/camera/stream")
+async def camera_stream():
+    """Tunnelerer live MJPEG-videostrømmen fra skriveren direkte til Obico."""
+    url = f"http://{PRINTER_IP}:8080/?action=stream"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = urllib.request.urlopen(req, timeout=10)
+        content_type = response.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=boundarydonotcross")
+        
+        def iter_stream():
+            try:
+                while True:
+                    chunk = response.read(4096)
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception as e:
+                logger.error(f"Error during stream transfer: {e}")
+            finally:
+                response.close()
+                
+        return StreamingResponse(iter_stream(), media_type=content_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Klarte ikke å viderekoble videostrøm: {e}")
     
 # --- DATABASE ROUTE ---
 @app.get("/server/database/item")
@@ -546,21 +567,6 @@ async def print_start():
 async def print_stop():
     return {"result": "ok"}
 
-@app.get("/server/webcams/get")
-async def get_webcam(name: str = None):
-    return {
-        "result": {
-            "name": name or "Elegoo Camera",
-            "service": "mjpeg",
-            "target_fps": 15,
-            "stream_url": "http://127.0.0.1:7125/camera/stream",      # <-- OPPDATERT!
-            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
-            "flip_horizontal": False,
-            "flip_vertical": False,
-            "rotation": 0
-        }
-    }
-
 @app.get("/server/authorization/check")
 async def check_auth():
     return {"result": {"authenticated": True}}
@@ -596,7 +602,8 @@ async def websocket_endpoint(websocket: WebSocket):
         active_websocket_clients.add(websocket)
     logger.info("Obico client connected to proxy WebSocket.")
     
-    initial_status = map_to_moonraker_format()
+    with elegoo_status_lock:
+        initial_status = map_to_moonraker_format()
     await websocket.send_text(json.dumps({
         "jsonrpc": "2.0",
         "result": {"status": initial_status},
@@ -612,9 +619,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 method = msg.get("method")
                 
                 if method in ["printer.objects.subscribe", "printer.objects.query"]:
+                    with elegoo_status_lock:
+                        status_fmt = map_to_moonraker_format()
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
-                        "result": {"status": map_to_moonraker_format()},
+                        "result": {"status": status_fmt},
                         "id": msg_id
                     }))
                 elif method == "server.info":
@@ -628,10 +637,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         "id": msg_id
                     }))
                 elif method == "printer.info":
+                    with elegoo_status_lock:
+                        state = map_to_moonraker_format()["print_stats"]["state"]
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": map_to_moonraker_format()["print_stats"]["state"],
+                            "state": state,
                             "state_message": "Printer is ready",
                             "hostname": "elegoo-cc2",
                             "software_version": "v0.12.0-proxy",
