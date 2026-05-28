@@ -48,7 +48,6 @@ def deep_merge(base: dict, update: dict):
 
 def map_to_moonraker_format():
     """Translates Elegoo's internal status cache to Moonraker's Klipper format."""
-    # Default fallback values if cache is empty
     ext_temp = elegoo_status_cache.get("extruder", {}).get("temperature", 0.0)
     ext_target = elegoo_status_cache.get("extruder", {}).get("target", 0.0)
     bed_temp = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
@@ -57,7 +56,6 @@ def map_to_moonraker_format():
     progress_raw = elegoo_status_cache.get("machine_status", {}).get("progress", 0)
     progress = float(progress_raw) / 100.0
 
-    # Determine state based on Elegoo status codes
     el_status = elegoo_status_cache.get("machine_status", {}).get("status", 1)
     el_sub_status = elegoo_status_cache.get("machine_status", {}).get("sub_status", 0)
     
@@ -135,12 +133,10 @@ def on_connect(client, userdata, flags, rc):
         logger.info("Connected to printer's MQTT broker via TCP.")
         mqtt_client_connected = True
         
-        # Subscribe to registration response, status threads, and command responses
         client.subscribe(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_response")
         client.subscribe(f"elegoo/{SERIAL_NUMBER}/api_status")
         client.subscribe(f"elegoo/{SERIAL_NUMBER}/{REQUEST_ID}/register_response")
         
-        # Send registration request immediately
         reg_payload = {"client_id": CLIENT_ID, "request_id": REQUEST_ID}
         client.publish(f"elegoo/{SERIAL_NUMBER}/api_register", json.dumps(reg_payload))
         logger.info("Registration request sent to the printer.")
@@ -155,35 +151,28 @@ def on_message(client, userdata, msg):
     except Exception:
         return
 
-    # Registration Response
     if "register_response" in topic:
         if payload.get("error") == "ok":
             logger.info("Registration approved by printer! Requesting full status report...")
-            # Request initial full status (method 1002)
             status_req = {"id": 100, "method": 102, "params": {}}
             client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(status_req))
         else:
             logger.error(f"Printer rejected registration: {payload.get('error')}")
 
-    # Full status report or incremental delta updates
     elif "api_status" in topic or "api_response" in topic:
         result_data = payload.get("result", {})
         if not result_data:
             return
             
-        # Check if it's a response to our full status request or a delta push
         if payload.get("method") == 1002 or not elegoo_status_cache:
             elegoo_status_cache = result_data
             logger.info("Full status report received and cached.")
         else:
-            # Perform deep merge on delta push (method 6000)
             deep_merge(elegoo_status_cache, result_data)
         
-        # Trigger a WebSocket broadcast to Obico in the event loop
         asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
 
 def mqtt_heartbeat_loop(mqtt_client):
-    """Background thread sending PING every 10 seconds to keep the connection alive."""
     while True:
         if mqtt_client_connected:
             try:
@@ -193,7 +182,6 @@ def mqtt_heartbeat_loop(mqtt_client):
                 logger.warning(f"Error sending heartbeat: {e}")
         time.sleep(10)
 
-# Start and manage MQTT in the background
 mqtt_client = mqtt.Client(client_id=CLIENT_ID)
 mqtt_client.username_pw_set("elegoo", ACCESS_CODE)
 mqtt_client.on_connect = on_connect
@@ -204,18 +192,32 @@ mqtt_client.on_message = on_message
 @app.get("/access/api_key")
 async def get_api_key():
     """Dummy endpoint to satisfy Obico's API key check."""
-    logger.info("Obico requested API key. Sending dummy key...")
     return {"result": "elegoo-obico-proxy-dummy-key"}
 
 @app.get("/server/info")
-@app.get("/printer/info")
-async def get_printer_info():
+async def get_server_info():
+    """Tells Obico that Moonraker and Klipper are fully connected and ready."""
     return {
         "result": {
-            "klipper_internal_version": "v0.12.0-proxy",
-            "cpu": "Allwinner R528 Proxy",
-            "printer_model": "Elegoo Centauri Carbon 2",
-            "state": map_to_moonraker_format()["print_stats"]["state"]
+            "state": "ready",
+            "klippy_state": "ready",
+            "klippy_connected": True,
+            "components": ["machine", "file_manager", "metadata"],
+            "failed_components": [],
+            "moonraker_version": "v0.12.0-proxy"
+        }
+    }
+
+@app.get("/printer/info")
+async def get_printer_info():
+    """Returns Klipper status info."""
+    return {
+        "result": {
+            "state": map_to_moonraker_format()["print_stats"]["state"],
+            "state_message": "Printer is ready",
+            "hostname": "elegoo-cc2",
+            "software_version": "v0.12.0-proxy",
+            "cpu_info": "Allwinner R528 Proxy"
         }
     }
 
@@ -227,7 +229,7 @@ async def query_printer_objects():
         }
     }
 
-# Control Endpoints for Obico (AI intervention on failures)
+# Control Endpoints for Obico
 @app.post("/printer/print/pause")
 async def print_pause():
     logger.info("Received PAUSE command from Obico. Forwarding to printer...")
@@ -257,7 +259,6 @@ async def websocket_endpoint(websocket: WebSocket):
     active_websocket_clients.add(websocket)
     logger.info("Obico client connected to proxy WebSocket.")
     
-    # Send current status immediately upon connection
     initial_status = map_to_moonraker_format()
     await websocket.send_text(json.dumps({
         "jsonrpc": "2.0",
@@ -267,24 +268,34 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # Handle incoming messages/requests from moonraker-obico
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
                 msg_id = msg.get("id")
                 method = msg.get("method")
                 
-                # Respond politely to standard requests to satisfy the client
                 if method in ["printer.objects.subscribe", "printer.objects.query"]:
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {"status": map_to_moonraker_format()},
                         "id": msg_id
                     }))
-                elif method in ["server.info", "printer.info"]:
+                elif method == "server.info":
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
-                        "result": {"state": "ready"},
+                        "result": {
+                            "state": "ready",
+                            "klippy_state": "ready",
+                            "klippy_connected": True
+                        },
+                        "id": msg_id
+                    }))
+                elif method == "printer.info":
+                    await websocket.send_text(json.dumps({
+                        "jsonrpc": "2.0",
+                        "result": {
+                            "state": map_to_moonraker_format()["print_stats"]["state"]
+                        },
                         "id": msg_id
                     }))
             except Exception:
@@ -295,23 +306,19 @@ async def websocket_endpoint(websocket: WebSocket):
         active_websocket_clients.remove(websocket)
 
 if __name__ == "__main__":
-    # Save current async event loop for thread-safe communication
     fastapi_loop = asyncio.get_event_loop()
     
-    # Start the MQTT client in a separate background thread
     logger.info(f"Connecting to printer at IP: {PRINTER_IP}...")
     try:
         mqtt_client.connect(PRINTER_IP, 1883, 60)
         mqtt_thread = threading.Thread(target=mqtt_client.loop_forever, daemon=True)
         mqtt_thread.start()
         
-        # Start the vital heartbeat thread
         heartbeat_thread = threading.Thread(target=mqtt_heartbeat_loop, args=(mqtt_client,), daemon=True)
         heartbeat_thread.start()
     except Exception as e:
         logger.error(f"Critical error: Could not start MQTT connection: {e}")
         sys.exit(1)
 
-    # Start FastAPI on port 7125 (default port for Moonraker)
     logger.info("Starting Moonraker emulation on port 7125...")
     uvicorn.run(app, host="0.0.0.0", port=7125)
