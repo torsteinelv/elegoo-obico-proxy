@@ -261,7 +261,30 @@ async def query_printer_objects():
         }
     }
 
-# --- FIKSET DATABASE-RUTE SOM SVELGER ALT (BÅDE GET OG POST) ---
+# --- NEW WEBCAM ENDPOINT TO TRANSMIT STREAM TO OBICO ---
+@app.get("/server/webcams/list")
+async def list_webcams():
+    """Tells Obico where to find the Elegoo printer's native webcam stream."""
+    logger.info("Obico requested webcam list. Routing to Elegoo native stream...")
+    return {
+        "result": {
+            "webcams": [
+                {
+                    "name": "Elegoo Camera",
+                    "service": "mjpeg",
+                    "target_fps": 25,
+                    # NOTE: If your Home Assistant config uses a different port or path, you can edit these strings below!
+                    "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
+                    "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+                    "flip_horizontal": False,
+                    "flip_vertical": False,
+                    "rotation": 0
+                }
+            ]
+        }
+    }
+
+# --- DATABASE ROUTE TO PREVENT 422/405 ERRORS ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
     """Returns 404 cleanly when Obico checks for missing settings (like webcams)."""
