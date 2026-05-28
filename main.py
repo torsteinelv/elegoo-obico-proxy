@@ -11,8 +11,6 @@ from contextlib import asynccontextmanager
 from threading import Lock
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
-import urllib.request
-import urllib.error
 import paho.mqtt.client as mqtt
 import uvicorn
 
@@ -307,21 +305,19 @@ async def query_printer_objects():
 # --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
-    logger.info("Obico requested webcam list. Routing to Elegoo native stream...")
+    logger.info("Obico requested webcam list. Routing directly to Elegoo native stream...")
     return {
         "result": {
-            "webcams": [
-                {
-                    "name": "Elegoo Camera",
-                    "service": "mjpeg",
-                    "target_fps": 15,
-                    "stream_url": f"http://127.0.0.1:7125/camera/stream",
-                    "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
-                    "flip_horizontal": False,
-                    "flip_vertical": False,
-                    "rotation": 0
-                }
-            ]
+            "webcams": [{
+                "name": "Elegoo Camera",
+                "service": "mjpeg",
+                "target_fps": 15,
+                "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
+                "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+                "flip_horizontal": False,
+                "flip_vertical": False,
+                "rotation": 0
+            }]
         }
     }
 
@@ -470,97 +466,13 @@ async def get_webcam(name: str = None):
             "name": name or "Elegoo Camera",
             "service": "mjpeg",
             "target_fps": 15,
-            "stream_url": f"http://127.0.0.1:7125/camera/stream",
-            "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
+            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
+            "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
             "flip_horizontal": False,
             "flip_vertical": False,
             "rotation": 0
         }
     }
-
-def _fetch(url: str, timeout: int = 10) -> urllib.request.urlopen:
-    """Blocking HTTP fetch, run in threadpool."""
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "Mozilla/5.0")
-    return urllib.request.urlopen(req, timeout=timeout)
-
-
-def _extract_jpeg_frame(url: str, timeout: int = 10) -> bytes | None:
-    """Parse an MJPEG stream and extract a single JPEG frame."""
-    import io
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", "Mozilla/5.0")
-    resp = urllib.request.urlopen(req, timeout=timeout)
-
-    data = b""
-    in_frame = False
-    while True:
-        chunk = resp.read(4096)
-        if not chunk:
-            break
-        data += chunk
-
-        # Look for JPEG start marker FF D8
-        start = data.find(b"\xff\xd8")
-        if start == -1:
-            # Keep only last 1 byte to not miss a split marker
-            if len(data) > 1:
-                data = data[-1:]
-            continue
-        if start > 0:
-            data = data[start:]
-
-        # Look for JPEG end marker FF D9
-        end = data.find(b"\xff\xd9")
-        if end == -1:
-            # Keep only last 1 byte to not miss a split marker
-            if len(data) > 1:
-                data = data[-1:]
-            continue
-
-        # Found complete frame
-        jpeg = data[:end + 2]
-        return jpeg
-
-    return None
-
-@app.get("/camera/stream")
-async def camera_stream():
-    """Proxy the Elegoo camera MJPEG stream."""
-    url = f"http://{PRINTER_IP}:8080/?action=stream"
-    try:
-        loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(None, _fetch, url)
-        reader = resp
-        async def stream_iter():
-            while True:
-                chunk = await loop.run_in_executor(None, reader.read, 4096)
-                if not chunk:
-                    break
-                yield chunk
-        return StreamingResponse(
-            stream_iter(),
-            media_type=resp.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-        )
-    except Exception as e:
-        logger.error(f"Camera stream error: {e}")
-        raise HTTPException(status_code=502, detail="Camera stream unavailable")
-
-@app.get("/camera/snapshot")
-async def camera_snapshot():
-    """Extract a single JPEG frame from the Elegoo MJPEG stream."""
-    url = f"http://{PRINTER_IP}:8080/?action=stream"
-    try:
-        loop = asyncio.get_running_loop()
-        jpeg = await loop.run_in_executor(None, _extract_jpeg_frame, url, 10)
-        if jpeg is None:
-            raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
-        return Response(content=jpeg, media_type="image/jpeg")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Camera snapshot error: {e}")
-        raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
 
 @app.get("/server/authorization/check")
 async def check_auth():
