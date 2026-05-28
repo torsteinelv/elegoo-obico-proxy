@@ -200,6 +200,13 @@ mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
 # HTTP Endpoints (Moonraker emulation)
+
+@app.get("/access/api_key")
+async def get_api_key():
+    """Dummy endpoint to satisfy Obico's API key check."""
+    logger.info("Obico requested API key. Sending dummy key...")
+    return {"result": "elegoo-obico-proxy-dummy-key"}
+
 @app.get("/server/info")
 @app.get("/printer/info")
 async def get_printer_info():
