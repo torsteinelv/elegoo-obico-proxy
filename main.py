@@ -45,21 +45,6 @@ REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
 
-# --- DEBUG ENDPOINT ---
-@app.get("/proxy/debug")
-async def proxy_debug():
-    """Viser intern proxy-status og cache direkte i nettleseren."""
-    with elegoo_status_lock:
-        status_cache_copy = dict(elegoo_status_cache)
-    
-    return {
-        "status": "running",
-        "mqtt_connected": mqtt_client_connected,
-        "active_websocket_clients_count": len(active_websocket_clients),
-        "elegoo_status_cache": status_cache_copy,
-        "mapped_to_moonraker": map_to_moonraker_format()
-    }
-
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
     for key, value in update.items():
@@ -246,19 +231,17 @@ def on_message(client, userdata, msg):
         if not result_data:
             return
             
-        method = payload.get("method")
-        # Telemetry / Status update
-        if result_data and method in [1002, 1001]:
-            if method == 1002 or not elegoo_status_cache:
-                with elegoo_status_lock:
-                    elegoo_status_cache = result_data
-                logger.info("Full status report received and cached.")
-            else:
-                with elegoo_status_lock:
-                    deep_merge(elegoo_status_cache, result_data)
+        # 🔥 FIX: Fjernet den strenge sjekken på [1002, 1001] slik at delta-oppdateringer (metode 6000) slipper igjennom!
+        if payload.get("method") == 1002 or not elegoo_status_cache:
+            with elegoo_status_lock:
+                elegoo_status_cache = result_data
+            logger.info("Full status report received and cached.")
+        else:
+            with elegoo_status_lock:
+                deep_merge(elegoo_status_cache, result_data)
 
-            if fastapi_loop:
-                asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
+        if fastapi_loop:
+            asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
 
 def mqtt_heartbeat_loop(mqtt_client):
     while True:
@@ -339,7 +322,7 @@ async def list_webcams():
                 "service": "mjpeg",
                 "target_fps": 15,
                 "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-                "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
+                "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
                 "flip_horizontal": False,
                 "flip_vertical": False,
                 "rotation": 0
@@ -369,7 +352,6 @@ async def get_files_list():
     
 def _extract_jpeg_frame(url: str, timeout: int = 10) -> bytes | None:
     """Tvinger Elegoo-kameraet til å gi oss nåtid ved å kaste de første 5 hele bildene."""
-    # 🔥 ANTI-CACHE: Lurer Elegoo-serveren til å tro at dette er en unik forespørsel hver gang
     busting_url = f"{url}&t={time.time()}"
     
     try:
@@ -378,32 +360,26 @@ def _extract_jpeg_frame(url: str, timeout: int = 10) -> bytes | None:
             data = b""
             frames_skipped = 0
             
-            # Vi leser dypt inn i strømmen
             for _ in range(500): 
                 chunk = response.read(4096)
                 if not chunk:
                     break
                 data += chunk
                 
-                # Sjekk kontinuerlig om vi har hele bilder i bufferen
                 while True:
-                    start = data.find(b"\xff\xd8") # Starten på et JPEG
+                    start = data.find(b"\xff\xd8")
                     if start == -1:
                         break
                     
-                    end = data.find(b"\xff\xd9", start) # Slutten på et JPEG
+                    end = data.find(b"\xff\xd9", start)
                     if end == -1:
                         break
                     
-                    # Vi fant et komplett bilde! 
                     if frames_skipped < 5:
-                        # 🗑️ KAST DE 5 FØRSTE BILDENE
-                        # Dette tømmer garantert hele det gamle minnet til kameraet
                         data = data[end+2:]
                         frames_skipped += 1
                         logger.info(f"Kastet spøkelsesbilde nr {frames_skipped}...")
                     else:
-                        # 📸 DETTE ER NÅTID: Returner det 6. bildet!
                         logger.info("Fant rykende ferskt bilde! Sender til Obico.")
                         return data[start:end+2]
                         
@@ -419,7 +395,6 @@ async def camera_snapshot():
     jpeg = await loop.run_in_executor(None, _extract_jpeg_frame, url, 5)
     
     if jpeg:
-        # 🔥 ANTI-CACHE: Tvinger Obico til å glemme det forrige bildet umiddelbart!
         return Response(
             content=jpeg, 
             media_type="image/jpeg",
@@ -461,7 +436,7 @@ async def post_database_item(request: Request):
         }
     }
 
-# --- G-KODE MOTOR FOR TERMINAL OG KONTROLLER (BÅDE GET OG POST) ---
+# --- G-KODE MOTOR FOR TERMINAL OG KONTROLLER ---
 @app.get("/printer/gcode/script")
 @app.post("/printer/gcode/script")
 async def execute_gcode(request: Request, script: str = None):
@@ -474,7 +449,6 @@ async def execute_gcode(request: Request, script: str = None):
             
     if script:
         logger.info(f"Obico sent G-code command: {script}")
-        # Standard G-kode wrapper for MQTT Klipper API
         cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
         mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
@@ -557,7 +531,7 @@ async def get_webcam(name: str = None):
             "service": "mjpeg",
             "target_fps": 15,
             "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <--- OPPDATERT! Denne tvinger trafikken gjennom proxyen din
+            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",
             "flip_horizontal": False,
             "flip_vertical": False,
             "rotation": 0
@@ -576,6 +550,20 @@ async def upload_file(request: Request):
     except Exception:
         pass
     return {"result": {"file": ""}}
+
+# --- DEBUG ENDPOINT ---
+@app.get("/proxy/debug")
+async def proxy_debug():
+    """Viser intern proxy-status og cache direkte i nettleseren."""
+    with elegoo_status_lock:
+        status_cache_copy = dict(elegoo_status_cache)
+    return {
+        "status": "running",
+        "mqtt_connected": mqtt_client_connected,
+        "active_websocket_clients_count": len(active_websocket_clients),
+        "elegoo_status_cache": status_cache_copy,
+        "mapped_to_moonraker": map_to_moonraker_format()
+    }
 
 @app.websocket("/websocket")
 @app.websocket("/server/websocket")
