@@ -7,7 +7,7 @@ import secrets
 import logging
 import asyncio
 import threading
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 import paho.mqtt.client as mqtt
 import uvicorn
 
@@ -261,12 +261,31 @@ async def query_printer_objects():
         }
     }
 
-# --- NYTT ENDEPUNKT FOR Å FORHINDRE KRASJ ---
+# --- FIKSET DATABASE-RUTE SOM SVELGER ALT (BÅDE GET OG POST) ---
+@app.get("/server/database/item")
+async def get_database_item(namespace: str = None, key: str = None):
+    """Returns 404 cleanly when Obico checks for missing settings (like webcams)."""
+    raise HTTPException(status_code=404, detail="Item not found in simulated database")
+
 @app.post("/server/database/item")
-async def post_database_item(data: dict):
-    """Dummy endpoint that accepts Obico's printer settings and returns success."""
-    logger.info(f"Obico saved a database item to proxy: {data}")
-    return {"result": data}
+async def post_database_item(request: Request):
+    """Dynamically accepts parameters via Query, Form, or JSON to avoid 422 errors."""
+    params = dict(request.query_params)
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            params.update(body)
+    except Exception:
+        pass
+    
+    logger.info(f"Obico safely saved a database item to proxy: {params}")
+    return {
+        "result": {
+            "namespace": params.get("namespace", "obico"),
+            "key": params.get("key", "printer_id"),
+            "value": params.get("value", 1)
+        }
+    }
 
 # Control Endpoints for Obico
 @app.post("/printer/print/pause")
