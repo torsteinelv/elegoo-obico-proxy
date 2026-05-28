@@ -287,7 +287,11 @@ async def get_printer_info():
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
-            "cpu_info": "Allwinner R528 Proxy"
+            "cpu_info": "Allwinner R528 Proxy",
+            "klipper_path": "/home/pi/klipper",
+            "python_path": "/home/pi/klippy-env/bin/python",
+            "log_file": "/tmp/klippy.log",
+            "config_file": "/home/pi/klipper_config/printer.cfg"
         }
     }
 
@@ -295,7 +299,13 @@ async def get_printer_info():
 async def list_printer_objects():
     return {
         "result": {
-            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks", "gcode_move", "fan"]
+            "objects": [
+                "toolhead", "extruder", "heater_bed", "print_stats", 
+                "display_status", "heaters", "virtual_sdcard", "webhooks", 
+                "gcode_move", "fan", 
+                "gcode_macro _OBICO_LAYER_CHANGE", 
+                "gcode_macro TIMELAPSE_TAKE_FRAME"
+            ]
         }
     }
 
@@ -319,21 +329,6 @@ async def list_webcams():
                 "flip_vertical": False,
                 "rotation": 0
             }]
-        }
-    }
-
-@app.get("/server/webcams/get")
-async def get_webcam(name: str = None):
-    return {
-        "result": {
-            "name": name or "Elegoo Camera",
-            "service": "mjpeg",
-            "target_fps": 15,
-            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
-            "flip_horizontal": False,
-            "flip_vertical": False,
-            "rotation": 0
         }
     }
 
@@ -610,7 +605,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": map_to_moonraker_format()["print_stats"]["state"]
+                            "state": map_to_moonraker_format()["print_stats"]["state"],
+                            "state_message": "Printer is ready",
+                            "hostname": "elegoo-cc2",
+                            "software_version": "v0.12.0-proxy",
+                            "cpu_info": "Allwinner R528 Proxy",
+                            "klipper_path": "/home/pi/klipper",
+                            "python_path": "/home/pi/klippy-env/bin/python",
+                            "log_file": "/tmp/klippy.log",
+                            "config_file": "/home/pi/klipper_config/printer.cfg"
                         },
                         "id": msg_id
                     }))
