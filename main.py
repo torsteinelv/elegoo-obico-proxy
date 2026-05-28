@@ -10,6 +10,9 @@ import threading
 from contextlib import asynccontextmanager
 from threading import Lock
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi.responses import Response, StreamingResponse
+import urllib.request
+import urllib.error
 import paho.mqtt.client as mqtt
 import uvicorn
 
@@ -312,8 +315,8 @@ async def list_webcams():
                     "name": "Elegoo Camera",
                     "service": "mjpeg",
                     "target_fps": 15,
-                    "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-                    "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+                    "stream_url": f"http://127.0.0.1:7125/camera/stream",
+                    "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
                     "flip_horizontal": False,
                     "flip_vertical": False,
                     "rotation": 0
@@ -467,13 +470,48 @@ async def get_webcam(name: str = None):
             "name": name or "Elegoo Camera",
             "service": "mjpeg",
             "target_fps": 15,
-            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+            "stream_url": f"http://127.0.0.1:7125/camera/stream",
+            "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
             "flip_horizontal": False,
             "flip_vertical": False,
             "rotation": 0
         }
     }
+
+def _fetch(url: str, timeout: int = 10) -> urllib.request.urlopen:
+    """Blocking HTTP fetch, run in threadpool."""
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "Mozilla/5.0")
+    return urllib.request.urlopen(req, timeout=timeout)
+
+@app.get("/camera/stream")
+async def camera_stream():
+    """Proxy the Elegoo camera MJPEG stream."""
+    url = f"http://{PRINTER_IP}:8080/?action=stream"
+    try:
+        resp = await fastapi_loop.run_in_executor(None, _fetch, url)
+        return StreamingResponse(
+            iter(lambda: fastapi_loop.run_in_executor(None, resp.read, 4096), b""),
+            media_type=resp.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        )
+    except Exception as e:
+        logger.error(f"Camera stream error: {e}")
+        raise HTTPException(status_code=502, detail="Camera stream unavailable")
+
+@app.get("/camera/snapshot")
+async def camera_snapshot():
+    """Proxy the Elegoo camera snapshot."""
+    url = f"http://{PRINTER_IP}:8080/?action=snapshot"
+    try:
+        resp = await fastapi_loop.run_in_executor(None, _fetch, url)
+        data = await fastapi_loop.run_in_executor(None, resp.read)
+        return Response(
+            content=data,
+            media_type=resp.headers.get("Content-Type", "image/jpeg")
+        )
+    except Exception as e:
+        logger.error(f"Camera snapshot error: {e}")
+        raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
 
 @app.get("/server/authorization/check")
 async def check_auth():
