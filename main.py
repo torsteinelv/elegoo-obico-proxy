@@ -358,39 +358,57 @@ async def get_files_list():
     return {"result": []}
 
 def _extract_jpeg_frame(url: str, timeout: int = 5) -> bytes | None:
-    """Kobler til MJPEG-strømmen, klipper ut ETT JPEG-bilde, og lukker tilkoblingen."""
+    """Kobler til strømmen, kaster gamle bufrede bilder, og henter et garantert ferskt bilde."""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        # Bli enige med serveren om at vi skal lukke tilkoblingen pent etterpå
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = b""
-            # Leser inn litt data for å finne ett komplett bilde
-            for _ in range(100): 
+            frames_skipped = 0
+            
+            for _ in range(200): # Leser litt dypere inn i strømmen
                 chunk = response.read(4096)
                 if not chunk:
                     break
                 data += chunk
                 
-                # Se etter JPEG start (FF D8) og slutt (FF D9)
+                # Finn start (FF D8) og slutt (FF D9) på JPEG
                 start = data.find(b"\xff\xd8")
                 if start != -1:
                     end = data.find(b"\xff\xd9", start)
                     if end != -1:
-                        return data[start:end+2]
+                        if frames_skipped < 2:
+                            # 🗑️ KAST DE 2 FØRSTE BILDENE: De er ofte gamle spøkelsesbilder
+                            data = data[end+2:]
+                            frames_skipped += 1
+                            continue
+                        else:
+                            # 📸 RETURNER DET 3. BILDET: Dette kommer direkte fra linsen NÅ!
+                            return data[start:end+2]
     except Exception as e:
-        logger.error(f"Klarte ikke å hente snapshot fra strømmen: {e}")
+        logger.error(f"Klarte ikke å hente ferskt snapshot: {e}")
     return None
 
 @app.get("/camera/snapshot")
 async def camera_snapshot():
-    """Gir Obico et feilfritt snapshot hentet direkte fra videostrømmen."""
+    """Gir Obico et feilfritt og ferskt snapshot uten caching."""
     url = f"http://{PRINTER_IP}:8080/?action=stream"
     loop = asyncio.get_running_loop()
     jpeg = await loop.run_in_executor(None, _extract_jpeg_frame, url, 5)
     
     if jpeg:
-        return Response(content=jpeg, media_type="image/jpeg")
+        # 🔥 ANTI-CACHE: Tvinger Obico til å glemme det forrige bildet umiddelbart!
+        return Response(
+            content=jpeg, 
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+        )
     raise HTTPException(status_code=502, detail="Camera snapshot unavailable")
-
+    
 # --- DATABASE ROUTE ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
