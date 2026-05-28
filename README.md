@@ -119,3 +119,11 @@ To bypass Obico's local network scan, you must manually link the printer by exec
 ## Roadmap (v2.0.0)
 
 We invite contributions to reverse-engineer the Elegoo file transfer protocol to support direct G-code uploads in future releases.
+
+## Acknowledgments & Credits
+
+This project stands on the shoulders of giants. Special thanks to the open-source community and projects that made this proxy possible:
+
+- **[Moonraker-Obico](https://github.com/TheSpaghettiDetective/moonraker-obico):** For the official client-side logic translating Klipper events into the Obico cloud/self-hosted ecosystem.
+- **Home Assistant Elegoo Community Research:** For the vital groundwork in reverse-engineering the Elegoo CC2/TinaLinux MQTT packet structures and telemetry topics.
+- **[Klipper](https://github.com/Klipper3d/klipper) & [Moonraker](https://github.com/Arksine/moonraker):** For defining the standard open 3D printing APIs that we emulate here.
