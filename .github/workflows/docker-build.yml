@@ -1,65 +1,57 @@
-name: Build and Push Proxy Container
+name: Build and Push Proxy Image
 
 on:
   push:
-    branches: [ "main", "master" ]
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ "main", "master" ]
-
-env:
-  REGISTRY: ghcr.io
-  # Dette blir automatisk f.eks. "ghcr.io/ditt-brukernavn/elegoo-cc2-obico-proxy"
-  IMAGE_NAME: ${{ github.repository }}
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'  # Kjører automatisk når du oppretter en Git-tag (f.eks. v1.0.0-beta)
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    
+    # 🔥 Gir skriptet eksplisitt tillatelse til å skrive pakker til ghcr.io
     permissions:
-      contents: read
-      packages: write
+      contents: read    # Nødvendig for å sjekke ut koden (checkout)
+      packages: write   # Nødvendig for å dytte imaget til GitHub Container Registry
 
     steps:
-      - name: Checkout code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Sette opp QEMU gjør at vi kan bygge for Raspberry Pi (ARM64) selv om GitHub kjører på x86 PC-er
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      # Set up Docker Buildx for avansert caching og multi-arkitektur-bygg
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Logg inn på GitHub Container Registry (bruker GitHubs innebygde token automatisk)
-      - name: Log into registry ${{ env.REGISTRY }}
-        if: github.event_name != 'pull_request'
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Genererer merkelapper (tags) som f.eks. :latest eller :main basert på git-historikken
-      - name: Extract Docker metadata
+      - name: Extract Docker Metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Lager :latest hvis du dytter direkte til main eller master
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            
+            # Hvis du dytter en Git-tag, merkes Docker-imaget med akkurat samme versjon (f.eks :v1.0.0-beta)
+            type=ref,event=tag
+            
+            # Hvis taggen inneholder ordet 'beta', lager den også en flytende :beta tag automatisk
+            type=raw,value=beta,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, 'beta') }}
 
-      # Bygg og (hvis det ikke er en PR) push bildet til GitHub Packages
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Innebygd GitHub-cache gjør at påfølgende bygg går lynraskt
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}     # ✅ Fikset fra 'status' til 'steps'
+          labels: ${{ steps.meta.outputs.labels }}   # ✅ Fikset fra 'status' til 'steps'
           cache-from: type=gha
           cache-to: type=gha,mode=max

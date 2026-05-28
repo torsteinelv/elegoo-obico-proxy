@@ -20,12 +20,14 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("ElegooObicoProxy")
 
-# Fetch Environment Variables - Safe, generic placeholders as defaults
+# Fetch Environment Variables
 PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
-SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2XXXXXXXXXXXX")
-ACCESS_CODE = os.getenv("ACCESS_CODE", "")
+SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2ABCD123456789")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "123456")
 
-# Global printer state & event loop reference
+app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
+
+# Global printer state (cache)
 elegoo_status_cache = {}
 elegoo_status_lock = Lock()
 active_websocket_clients = set()
@@ -33,7 +35,7 @@ active_ws_lock = Lock()
 mqtt_client_connected = False
 fastapi_loop = None
 
-# Generate valid IDs matching Elegoo's official web interface format (Credit: danielcherubini)
+# Generate valid IDs matching Elegoo's official web interface format
 timestamp_hex = format(int(time.time() * 1000), "x")[-5:]
 random_hex = secrets.token_hex(3)
 CLIENT_ID = f"0cli{timestamp_hex}{random_hex}"[:10]
@@ -43,17 +45,6 @@ timestamp_hex_long = format(int(time.time() * 1000), "x")
 REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Captures the live running event loop and handles startup/shutdown securely."""
-    global fastapi_loop
-    fastapi_loop = asyncio.get_running_loop()
-    logger.info("Successfully captured the live Uvicorn event loop via lifespan handler.")
-    yield
-    logger.info("Shutting down application lifespan.")
-
-app = FastAPI(title="Elegoo CC2 to Moonraker Proxy", lifespan=lifespan)
 
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
@@ -70,6 +61,7 @@ def map_to_moonraker_format():
     bed_temp = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
     bed_target = elegoo_status_cache.get("heater_bed", {}).get("target", 0.0)
     
+    # Robust progress parsing
     progress_raw = elegoo_status_cache.get("machine_status", {}).get("progress", 0)
     if not progress_raw:
         progress_raw = elegoo_status_cache.get("print_status", {}).get("progress", 0)
@@ -100,6 +92,7 @@ def map_to_moonraker_format():
     elif el_status == 4:
         klipper_state = "printing"
 
+    # Robust filename parsing
     filename = elegoo_status_cache.get("print_status", {}).get("filename", "")
     if not filename:
         filename = elegoo_status_cache.get("machine_status", {}).get("filename", "")
@@ -171,7 +164,7 @@ async def broadcast_status_to_websockets():
     notification = {
         "jsonrpc": "2.0",
         "method": "notify_status_update",
-        "params": [{"eventtime": time.time(), "status": status_data}]
+        "params": [status_data]
     }
 
     payload = json.dumps(notification)
@@ -219,7 +212,7 @@ def on_connect(client, userdata, flags, rc):
         logger.error(f"Could not connect to printer's MQTT. Status code: {rc}")
 
 def on_message(client, userdata, msg):
-    global elegoo_status_cache, fastapi_loop
+    global elegoo_status_cache
     topic = msg.topic
     try:
         payload = json.loads(msg.payload.decode('utf-8'))
@@ -235,22 +228,11 @@ def on_message(client, userdata, msg):
             logger.error(f"Printer rejected registration: {payload.get('error')}")
 
     elif "api_status" in topic or "api_response" in topic:
-        method = payload.get("method")
         result_data = payload.get("result", {})
-        
-        # Capture terminal reply
-        if method not in [1002, 1001] and "api_response" in topic:
-            gcode_text = ""
-            if isinstance(result_data, dict) and "ack" in result_data:
-                gcode_text = str(result_data["ack"])
-            elif isinstance(result_data, str):
-                gcode_text = result_data
-            else:
-                gcode_text = f"// elegoo reply: {json.dumps(payload)}"
-                
-            if gcode_text and fastapi_loop:
-                asyncio.run_coroutine_threadsafe(broadcast_gcode_response(gcode_text), fastapi_loop)
+        if not result_data:
+            return
             
+        method = payload.get("method")
         # Telemetry / Status update
         if result_data and method in [1002, 1001]:
             if method == 1002 or not elegoo_status_cache:
@@ -280,6 +262,7 @@ mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
 # HTTP Endpoints (Moonraker emulation)
+
 @app.get("/access/api_key")
 async def get_api_key():
     return {"result": "elegoo-obico-proxy-dummy-key"}
@@ -301,15 +284,11 @@ async def get_server_info():
 async def get_printer_info():
     return {
         "result": {
-            "state": "ready",
+            "state": map_to_moonraker_format()["print_stats"]["state"],
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
-            "cpu_info": "Allwinner R528 Proxy",
-            "klipper_path": "/opt/inst",
-            "python_path": "/usr/bin/python3",
-            "log_file": "/tmp/klippy.log",
-            "config_file": "/opt/inst/printer_dsp.cfg"
+            "cpu_info": "Allwinner R528 Proxy"
         }
     }
 
@@ -323,15 +302,12 @@ async def list_printer_objects():
 
 @app.get("/printer/objects/query")
 async def query_printer_objects():
-    return {
-        "result": {
-            "eventtime": time.time(),
-            "status": map_to_moonraker_format()
-        }
-    }
+    return {"result": {"status": map_to_moonraker_format()}}
 
+# --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
+    logger.info("Obico requested webcam list. Routing to Elegoo native stream...")
     return {
         "result": {
             "webcams": [
@@ -355,6 +331,7 @@ async def get_device_power_devices():
 
 @app.get("/server/files/metadata")
 async def get_metadata(filename: str = ""):
+    logger.info(f"Obico requested metadata for {filename}")
     return {
         "result": {
             "filename": filename,
@@ -368,6 +345,7 @@ async def get_metadata(filename: str = ""):
 async def get_files_list():
     return {"result": []}
 
+# --- DATABASE ROUTE ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
     return {
@@ -387,6 +365,8 @@ async def post_database_item(request: Request):
             params.update(body)
     except Exception:
         pass
+    
+    logger.info(f"Obico safely saved a database item to proxy: {params}")
     return {
         "result": {
             "namespace": params.get("namespace", "obico"),
@@ -395,6 +375,7 @@ async def post_database_item(request: Request):
         }
     }
 
+# --- G-KODE MOTOR FOR TERMINAL OG KONTROLLER (BÅDE GET OG POST) ---
 @app.get("/printer/gcode/script")
 @app.post("/printer/gcode/script")
 async def execute_gcode(request: Request, script: str = None):
@@ -407,24 +388,29 @@ async def execute_gcode(request: Request, script: str = None):
             
     if script:
         logger.info(f"Obico sent G-code command: {script}")
+        # Standard G-kode wrapper for MQTT Klipper API
         cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
         mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
+# Control Endpoints for Obico
 @app.post("/printer/print/pause")
 async def print_pause():
+    logger.info("Received PAUSE command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1021, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/resume")
 async def print_resume():
+    logger.info("Received RESUME command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/cancel")
 async def print_cancel():
+    logger.info("Received CANCEL command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
@@ -551,7 +537,7 @@ async def websocket_endpoint(websocket: WebSocket):
     initial_status = map_to_moonraker_format()
     await websocket.send_text(json.dumps({
         "jsonrpc": "2.0",
-        "result": {"eventtime": time.time(), "status": initial_status},
+        "result": {"status": initial_status},
         "id": 1
     }))
 
@@ -566,7 +552,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if method in ["printer.objects.subscribe", "printer.objects.query"]:
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
-                        "result": {"eventtime": time.time(), "status": map_to_moonraker_format()},
+                        "result": {"status": map_to_moonraker_format()},
                         "id": msg_id
                     }))
                 elif method == "server.info":
@@ -575,10 +561,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "result": {
                             "state": "ready",
                             "klippy_state": "ready",
-                            "klippy_connected": True,
-                            "components": ["machine", "file_manager", "metadata"],
-                            "failed_components": [],
-                            "moonraker_version": "v0.12.0-proxy"
+                            "klippy_connected": True
                         },
                         "id": msg_id
                     }))
@@ -586,15 +569,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": "ready",
-                            "state_message": "Printer is ready",
-                            "hostname": "elegoo-cc2",
-                            "software_version": "v0.12.0-proxy",
-                            "cpu_info": "Allwinner R528 Proxy",
-                            "klipper_path": "/opt/inst",
-                            "python_path": "/usr/bin/python3",
-                            "log_file": "/tmp/klippy.log",
-                            "config_file": "/opt/inst/printer_dsp.cfg"
+                            "state": map_to_moonraker_format()["print_stats"]["state"]
                         },
                         "id": msg_id
                     }))
@@ -626,6 +601,8 @@ async def websocket_endpoint(websocket: WebSocket):
             active_websocket_clients.discard(websocket)
 
 if __name__ == "__main__":
+    fastapi_loop = asyncio.get_event_loop()
+    
     logger.info(f"Connecting to printer at IP: {PRINTER_IP}...")
     try:
         mqtt_client.connect(PRINTER_IP, 1883, 60)
