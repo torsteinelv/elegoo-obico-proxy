@@ -562,7 +562,6 @@ async def websocket_endpoint(websocket: WebSocket):
             active_websocket_clients.discard(websocket)
 
 if __name__ == "__main__":
-    fastapi_loop = asyncio.get_event_loop()
     
     logger.info(f"Connecting to printer at IP: {PRINTER_IP}...")
     try:
