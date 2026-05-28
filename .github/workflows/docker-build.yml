@@ -6,11 +6,17 @@ on:
       - main
       - master
     tags:
-      - 'v*'  # <--- VIGTIG: Dette tvinger Actions til å kjøre når du pusher en tag (f.eks v1.0.0-beta)
+      - 'v*'  # Kjører automatisk når du oppretter en Git-tag (f.eks. v1.0.0-beta)
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    
+    # 🔥 Gir skriptet eksplisitt tillatelse til å skrive pakker til ghcr.io
+    permissions:
+      contents: read    # Nødvendig for å sjekke ut koden (checkout)
+      packages: write   # Nødvendig for å dytte imaget til GitHub Container Registry
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -31,13 +37,13 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            # Kjører du på main/master, lages som vanlig :latest
+            # Lager :latest hvis du dytter direkte til main eller master
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
             
-            # Hvis du pusher en Git-tag (f.eks v1.0.0-beta), blir Docker-imaget tagget med nøyaktig samme navn!
+            # Hvis du dytter en Git-tag, merkes Docker-imaget med akkurat samme versjon (f.eks :v1.0.0-beta)
             type=ref,event=tag
             
-            # Hvis taggen inneholder ordet 'beta', lager den i tillegg en universell :beta tag
+            # Hvis taggen inneholder ordet 'beta', lager den også en flytende :beta tag automatisk
             type=raw,value=beta,enable=${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref, 'beta') }}
 
       - name: Build and Push Docker Image
@@ -45,7 +51,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}   # <-- Endret fra status til steps!
-          labels: ${{ steps.meta.outputs.labels }} # <-- Endret fra status til steps!
+          tags: ${{ steps.meta.outputs.tags }}     # ✅ Fikset fra 'status' til 'steps'
+          labels: ${{ steps.meta.outputs.labels }}   # ✅ Fikset fra 'status' til 'steps'
           cache-from: type=gha
           cache-to: type=gha,mode=max
