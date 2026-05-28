@@ -45,6 +45,21 @@ REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
 
+# --- DEBUG ENDPOINT ---
+@app.get("/proxy/debug")
+async def proxy_debug():
+    """Viser intern proxy-status og cache direkte i nettleseren."""
+    with elegoo_status_lock:
+        status_cache_copy = dict(elegoo_status_cache)
+    
+    return {
+        "status": "running",
+        "mqtt_connected": mqtt_client_connected,
+        "active_websocket_clients_count": len(active_websocket_clients),
+        "elegoo_status_cache": status_cache_copy,
+        "mapped_to_moonraker": map_to_moonraker_format()
+    }
+
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
     for key, value in update.items():
