@@ -357,31 +357,44 @@ async def get_metadata(filename: str = ""):
 async def get_files_list():
     return {"result": []}
     
-def _extract_jpeg_frame(url: str, timeout: int = 8) -> bytes | None:
-    """Kobler til strømmen, lar linsen varme opp i 1.5 sek, og klipper så et rykende ferskt bilde."""
+def _extract_jpeg_frame(url: str, timeout: int = 10) -> bytes | None:
+    """Tvinger Elegoo-kameraet til å gi oss nåtid ved å kaste de første 5 hele bildene."""
+    # 🔥 ANTI-CACHE: Lurer Elegoo-serveren til å tro at dette er en unik forespørsel hver gang
+    busting_url = f"{url}&t={time.time()}"
+    
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
+        req = urllib.request.Request(busting_url, headers={'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            
-            # 1. ANTI-SPØKELSE: Les og kast all data i 1.5 sekunder
-            # Dette gir det fysiske kameraet tid til å våkne og dytte ut nye bilder
-            flush_end_time = time.time() + 1.5
-            while time.time() < flush_end_time:
-                response.read(4096)
-                
-            # 2. FANG BILDET: Nå vet vi at dataene som kommer utelukkende er ferske!
             data = b""
-            for _ in range(150): 
+            frames_skipped = 0
+            
+            # Vi leser dypt inn i strømmen
+            for _ in range(500): 
                 chunk = response.read(4096)
                 if not chunk:
                     break
                 data += chunk
                 
-                # Finn start og slutt på et helt JPEG-bilde
-                start = data.find(b"\xff\xd8")
-                if start != -1:
-                    end = data.find(b"\xff\xd9", start)
-                    if end != -1:
+                # Sjekk kontinuerlig om vi har hele bilder i bufferen
+                while True:
+                    start = data.find(b"\xff\xd8") # Starten på et JPEG
+                    if start == -1:
+                        break
+                    
+                    end = data.find(b"\xff\xd9", start) # Slutten på et JPEG
+                    if end == -1:
+                        break
+                    
+                    # Vi fant et komplett bilde! 
+                    if frames_skipped < 5:
+                        # 🗑️ KAST DE 5 FØRSTE BILDENE
+                        # Dette tømmer garantert hele det gamle minnet til kameraet
+                        data = data[end+2:]
+                        frames_skipped += 1
+                        logger.info(f"Kastet spøkelsesbilde nr {frames_skipped}...")
+                    else:
+                        # 📸 DETTE ER NÅTID: Returner det 6. bildet!
+                        logger.info("Fant rykende ferskt bilde! Sender til Obico.")
                         return data[start:end+2]
                         
     except Exception as e:
