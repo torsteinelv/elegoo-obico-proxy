@@ -349,7 +349,7 @@ async def get_database_item(namespace: str = None, key: str = None):
         "result": {
             "namespace": namespace or "",
             "key": key or "",
-            "value": None
+            "value": {}
         }
     }
 
@@ -421,9 +421,77 @@ async def emergency_stop():
 async def get_history(limit: int = 1, order: str = "desc"):
     return {"result": {"jobs": []}}
 
+@app.get("/server/history/stats")
+async def get_history_stats():
+    return {
+        "result": {
+            "total_jobs": 0,
+            "longest_job": 0.0,
+            "total_print_time": 0.0,
+            "total_filament": 0.0
+        }
+    }
+
 @app.get("/machine/update/status")
 async def get_update_status(refresh: str = "false"):
     return {"result": {"version_info": []}}
+
+@app.get("/machine/config/info")
+async def get_machine_config_info():
+    return {"result": {}}
+
+@app.get("/printer/state/retractors")
+async def get_retractors():
+    return {"result": []}
+
+@app.get("/printer/state")
+async def get_printer_state():
+    return {"result": {"state": "ready", "message": "Printer is ready"}}
+
+@app.get("/printer/config/info")
+async def get_printer_config_info():
+    return {"result": {}}
+
+@app.post("/printer/print/start")
+async def print_start():
+    return {"result": "ok"}
+
+@app.post("/printer/print/stop")
+async def print_stop():
+    return {"result": "ok"}
+
+@app.get("/server/webcams/get")
+async def get_webcam(name: str = None):
+    return {
+        "result": {
+            "name": name or "Elegoo Camera",
+            "service": "mjpeg",
+            "target_fps": 15,
+            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
+            "snapshot_url": f"http://{PRINTER_IP}:8080/?action=snapshot",
+            "flip_horizontal": False,
+            "flip_vertical": False,
+            "rotation": 0
+        }
+    }
+
+@app.get("/server/authorization/check")
+async def check_auth():
+    return {"result": {"authenticated": True}}
+
+@app.post("/server/files/upload")
+async def upload_file(request: Request):
+    try:
+        async for _ in request.stream():
+            pass
+@app.post("/server/files/upload")
+async def upload_file(request: Request):
+    try:
+        async for _ in request.stream():
+            pass
+    except Exception:
+        pass
+    return {"result": {"file": ""}}
 
 @app.websocket("/websocket")
 @app.websocket("/server/websocket")
