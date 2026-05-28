@@ -357,7 +357,6 @@ async def get_metadata(filename: str = ""):
 async def get_files_list():
     return {"result": []}
 
-Python
 def _extract_jpeg_frame(url: str, timeout: int = 5) -> bytes | None:
     """Kobler til MJPEG-strømmen, klipper ut ETT JPEG-bilde, og lukker tilkoblingen."""
     try:
