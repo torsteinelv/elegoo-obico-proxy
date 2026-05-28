@@ -448,7 +448,7 @@ async def get_history_stats():
 
 @app.get("/machine/update/status")
 async def get_update_status(refresh: str = "false"):
-    return {"result": {"version_info": []}}
+    return {"result": {"version_info": {}}}
 
 @app.get("/machine/config/info")
 async def get_machine_config_info():
