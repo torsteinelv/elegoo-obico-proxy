@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install git and tools needed for building
-RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg curl && rm -rf /var/lib/apt/lists/*
+# Install git, janus and tools needed for building
+RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg curl janus && rm -rf /var/lib/apt/lists/*
 
 # Clone the official Obico client
 RUN git clone https://github.com/TheSpaghettiDetective/moonraker-obico.git /app/moonraker-obico
