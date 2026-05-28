@@ -437,7 +437,14 @@ async def get_history(limit: int = 1, order: str = "desc"):
 
 @app.get("/server/history/stats")
 async def get_history_stats():
-    return {"result": {}}
+    return {
+        "result": {
+            "total_jobs": 0,
+            "longest_job": 0.0,
+            "total_print_time": 0.0,
+            "total_filament": 0.0
+        }
+    }
 
 @app.get("/machine/update/status")
 async def get_update_status(refresh: str = "false"):
@@ -488,6 +495,11 @@ async def check_auth():
 
 @app.post("/server/files/upload")
 async def upload_file(request: Request):
+    try:
+        async for _ in request.stream():
+            pass
+    except Exception:
+        pass
     return {"result": {"file": ""}}
 
 @app.websocket("/websocket")
