@@ -17,9 +17,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("ElegooObicoProxy")
 
 # Fetch Environment Variables
-PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
-SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2ABCD123456789")
-ACCESS_CODE = os.getenv("ACCESS_CODE", "123456")
+PRINTER_IP = os.getenv("PRINTER_IP", "10.10.11.41")
+SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "F01DUH8HZVBY031")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "BPaTKN")
 
 # Global printer state & event loop reference
 elegoo_status_cache = {}
@@ -27,7 +27,7 @@ active_websocket_clients = set()
 mqtt_client_connected = False
 fastapi_loop = None
 
-# Generate valid IDs matching Elegoo's official web interface format
+# Generate valid IDs matching Elegoo's official web interface format (Credit: danielcherubini)
 timestamp_hex = format(int(time.time() * 1000), "x")[-5:]
 random_hex = format(secrets.randbelow(4096), "x")
 CLIENT_ID = f"0cli{timestamp_hex}{random_hex}"[:10]
@@ -142,7 +142,7 @@ def map_to_moonraker_format():
     }
 
 async def broadcast_status_to_websockets():
-    """Broadcasting updated Moonraker status to all open WebSockets for Obico."""
+    """Broadcasting updated Moonraker status with valid eventtime to all open WebSockets."""
     if not active_websocket_clients:
         return
     
@@ -150,7 +150,7 @@ async def broadcast_status_to_websockets():
     notification = {
         "jsonrpc": "2.0",
         "method": "notify_status_update",
-        "params": [status_data]
+        "params": [{"eventtime": time.time(), "status": status_data}]
     }
     
     payload = json.dumps(notification)
@@ -274,11 +274,15 @@ async def get_server_info():
 async def get_printer_info():
     return {
         "result": {
-            "state": "ready",  # Fixed to "ready" to prevent Obico initialization loops
+            "state": "ready",
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
-            "cpu_info": "Allwinner R528 Proxy"
+            "cpu_info": "Allwinner R528 Proxy",
+            "klipper_path": "/opt/inst",
+            "python_path": "/usr/bin/python3",
+            "log_file": "/tmp/klippy.log",
+            "config_file": "/opt/inst/printer_dsp.cfg"
         }
     }
 
@@ -292,7 +296,12 @@ async def list_printer_objects():
 
 @app.get("/printer/objects/query")
 async def query_printer_objects():
-    return {"result": {"status": map_to_moonraker_format()}}
+    return {
+        "result": {
+            "eventtime": time.time(),
+            "status": map_to_moonraker_format()
+        }
+    }
 
 @app.get("/server/webcams/list")
 async def list_webcams():
@@ -393,7 +402,7 @@ async def websocket_endpoint(websocket: WebSocket):
     initial_status = map_to_moonraker_format()
     await websocket.send_text(json.dumps({
         "jsonrpc": "2.0",
-        "result": {"status": initial_status},
+        "result": {"eventtime": time.time(), "status": initial_status},
         "id": 1
     }))
 
@@ -408,7 +417,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if method in ["printer.objects.subscribe", "printer.objects.query"]:
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
-                        "result": {"status": map_to_moonraker_format()},
+                        "result": {"eventtime": time.time(), "status": map_to_moonraker_format()},
                         "id": msg_id
                     }))
                 elif method == "server.info":
@@ -417,7 +426,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         "result": {
                             "state": "ready",
                             "klippy_state": "ready",
-                            "klippy_connected": True
+                            "klippy_connected": True,
+                            "components": ["machine", "file_manager", "metadata"],
+                            "failed_components": [],
+                            "moonraker_version": "v0.12.0-proxy"
                         },
                         "id": msg_id
                     }))
@@ -425,7 +437,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps({
                         "jsonrpc": "2.0",
                         "result": {
-                            "state": "ready"
+                            "state": "ready",
+                            "state_message": "Printer is ready",
+                            "hostname": "elegoo-cc2",
+                            "software_version": "v0.12.0-proxy",
+                            "cpu_info": "Allwinner R528 Proxy",
+                            "klipper_path": "/opt/inst",
+                            "python_path": "/usr/bin/python3",
+                            "log_file": "/tmp/klippy.log",
+                            "config_file": "/opt/inst/printer_dsp.cfg"
                         },
                         "id": msg_id
                     }))
