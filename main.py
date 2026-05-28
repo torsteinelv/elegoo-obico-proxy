@@ -151,6 +151,23 @@ async def broadcast_status_to_websockets():
         except Exception:
             active_websocket_clients.remove(ws)
 
+# --- NY FUNKSJON: SENDER SVAR TILBAKE TIL OBICO TERMINAL ---
+async def broadcast_gcode_response(text: str):
+    """Broadcasting G-code terminal text replies back to the Obico console interface."""
+    if not active_websocket_clients:
+        return
+    notification = {
+        "jsonrpc": "2.0",
+        "method": "notify_gcode_response",
+        "params": [text]
+    }
+    payload = json.dumps(notification)
+    for ws in list(active_websocket_clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            active_websocket_clients.remove(ws)
+
 # MQTT Callbacks
 def on_connect(client, userdata, flags, rc):
     global mqtt_client_connected
@@ -185,17 +202,34 @@ def on_message(client, userdata, msg):
             logger.error(f"Printer rejected registration: {payload.get('error')}")
 
     elif "api_status" in topic or "api_response" in topic:
+        method = payload.get("method")
         result_data = payload.get("result", {})
-        if not result_data:
-            return
-            
-        if payload.get("method") == 1002 or not elegoo_status_cache:
-            elegoo_status_cache = result_data
-            logger.info("Full status report received and cached.")
-        else:
-            deep_merge(elegoo_status_cache, result_data)
         
-        asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
+        # Sjekk om dette er et svar på en terminal-kommando (f.eks. metode 1008)
+        if method not in [1002, 1001] and "api_response" in topic:
+            logger.info(f"Custom terminal API response caught: {payload}")
+            
+            # Trekk ut svar-teksten (Elegoo bruker ofte feltet 'ack')
+            gcode_text = ""
+            if isinstance(result_data, dict) and "ack" in result_data:
+                gcode_text = str(result_data["ack"])
+            elif isinstance(result_data, str):
+                gcode_text = result_data
+            else:
+                gcode_text = f"// elegoo raw reply: {json.dumps(payload)}"
+                
+            if gcode_text:
+                asyncio.run_coroutine_threadsafe(broadcast_gcode_response(gcode_text), fastapi_loop)
+            
+        # Standard statusoppdatering (telemetri)
+        if result_data and method in [1002, 1001]:
+            if method == 1002 or not elegoo_status_cache:
+                elegoo_status_cache = result_data
+                logger.info("Full status report received and cached.")
+            else:
+                deep_merge(elegoo_status_cache, result_data)
+            
+            asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
 
 def mqtt_heartbeat_loop(mqtt_client):
     while True:
@@ -330,7 +364,6 @@ async def execute_gcode(request: Request, script: str = None):
             
     if script:
         logger.info(f"Obico sent G-code command: {script}")
-        # Standard G-kode wrapper for MQTT Klipper API
         cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
         mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
