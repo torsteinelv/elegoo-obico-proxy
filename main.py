@@ -45,6 +45,29 @@ REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
 
+
+@app.get("/camera/stream")
+async def camera_stream():
+    """Tunnelerer live MJPEG-videostrømmen fra skriveren direkte til Obico."""
+    url = f"http://{PRINTER_IP}:8080/?action=stream"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        # Åpner strømmen fra skriveren
+        response = urllib.request.urlopen(req, timeout=10)
+        content_type = response.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=boundarydonotcross")
+        
+        # Generator som leser rådata i biter og videresender dem umiddelbart
+        def iter_stream():
+            while True:
+                chunk = response.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+                
+        return StreamingResponse(iter_stream(), media_type=content_type)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Klarte ikke å viderekoble videostrøm: {e}")
+
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
     for key, value in update.items():
@@ -314,15 +337,15 @@ async def query_printer_objects():
 # --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
-    logger.info("Obico requested webcam list. Routing snapshot through proxy clipper...")
+    logger.info("Obico requested webcam list. Routing stream and snapshot through proxy...")
     return {
         "result": {
             "webcams": [{
                 "name": "Elegoo Camera",
                 "service": "mjpeg",
                 "target_fps": 15,
-                "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-                "snapshot_url": f"http://127.0.0.1:7125/camera/snapshot",
+                "stream_url": "http://127.0.0.1:7125/camera/stream",      # <-- OPPDATERT!
+                "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
                 "flip_horizontal": False,
                 "flip_vertical": False,
                 "rotation": 0
@@ -530,8 +553,8 @@ async def get_webcam(name: str = None):
             "name": name or "Elegoo Camera",
             "service": "mjpeg",
             "target_fps": 15,
-            "stream_url": f"http://{PRINTER_IP}:8080/?action=stream",
-            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",
+            "stream_url": "http://127.0.0.1:7125/camera/stream",      # <-- OPPDATERT!
+            "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",  # <-- OPPDATERT!
             "flip_horizontal": False,
             "flip_vertical": False,
             "rotation": 0
