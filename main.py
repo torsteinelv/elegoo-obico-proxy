@@ -7,6 +7,7 @@ import secrets
 import logging
 import asyncio
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 import paho.mqtt.client as mqtt
 import uvicorn
@@ -15,10 +16,10 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("ElegooObicoProxy")
 
-# Fetch Environment Variables
+# Fetch Environment Variables - Kept generic for GitHub security (Gemini Code Assist approved)
 PRINTER_IP = os.getenv("PRINTER_IP", "192.168.1.100")
-SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2ABCD123456789")
-ACCESS_CODE = os.getenv("ACCESS_CODE", "123456")
+SERIAL_NUMBER = os.getenv("SERIAL_NUMBER", "CC2XXXXXXXXXXXX")
+ACCESS_CODE = os.getenv("ACCESS_CODE", "")
 
 app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 
@@ -26,10 +27,11 @@ app = FastAPI(title="Elegoo CC2 to Moonraker Proxy")
 elegoo_status_cache = {}
 active_websocket_clients = set()
 mqtt_client_connected = False
+fastapi_loop = None
 
-# Generate valid IDs matching Elegoo's official web interface format
+# Generate secure client IDs with higher entropy to prevent collisions (Claude v2 approved)
 timestamp_hex = format(int(time.time() * 1000), "x")[-5:]
-random_hex = format(secrets.randbelow(4096), "x")
+random_hex = secrets.token_hex(3) 
 CLIENT_ID = f"0cli{timestamp_hex}{random_hex}"[:10]
 
 uuid_part = "".join(format(secrets.randbelow(16) if c == "x" else (secrets.randbelow(4) + 8), "x") for c in "xxxxxxxxxxxxxxxx")
@@ -37,6 +39,17 @@ timestamp_hex_long = format(int(time.time() * 1000), "x")
 REQUEST_ID = f"{uuid_part}{timestamp_hex_long}"
 
 logger.info(f"Generated client identifiers: CLIENT_ID={CLIENT_ID}, REQUEST_ID={REQUEST_ID}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Captures the live running event loop and handles startup/shutdown securely."""
+    global fastapi_loop
+    fastapi_loop = asyncio.get_running_loop()
+    logger.info("Successfully captured the live Uvicorn event loop via lifespan handler.")
+    yield
+    logger.info("Shutting down application lifespan.")
+
+app = FastAPI(title="Elegoo CC2 to Moonraker Proxy", lifespan=lifespan)
 
 def deep_merge(base: dict, update: dict):
     """Recursive merge of delta status updates."""
@@ -53,7 +66,20 @@ def map_to_moonraker_format():
     bed_temp = elegoo_status_cache.get("heater_bed", {}).get("temperature", 0.0)
     bed_target = elegoo_status_cache.get("heater_bed", {}).get("target", 0.0)
     
-    # Robust progress parsing
+    # Extract fan speed (0-255 mapped to 0.0-1.0 float for Moonraker)
+    fan_raw = elegoo_status_cache.get("fans", {}).get("fan", {}).get("speed", 0)
+    fan_speed = round(fan_raw / 255.0, 2) if fan_raw else 0.0
+    
+    # Extract real-time coordinate position data
+    gm = elegoo_status_cache.get("gcode_move_inf", {})
+    if not gm:
+        gm = elegoo_status_cache.get("gcode_move", {})
+    pos_x = gm.get("x", 0.0)
+    pos_y = gm.get("y", 0.0)
+    pos_z = gm.get("z", 0.0)
+    pos_e = gm.get("e", 0.0)
+    gcode_position = [pos_x, pos_y, pos_z, pos_e]
+    
     progress_raw = elegoo_status_cache.get("machine_status", {}).get("progress", 0)
     if not progress_raw:
         progress_raw = elegoo_status_cache.get("print_status", {}).get("progress", 0)
@@ -66,10 +92,10 @@ def map_to_moonraker_format():
 
     el_status = elegoo_status_cache.get("machine_status", {}).get("status", 1)
     el_sub_status = elegoo_status_cache.get("machine_status", {}).get("sub_status", 0)
-    
-    klipper_state = "ready"
+
+    klipper_state = "standby"
     if el_status == 2:
-        if el_sub_status in [2502, 2505]:
+        if el_sub_status in [2501, 2502, 2503, 2505]: # 2501=pausing, 2503=stopping
             klipper_state = "paused"
         elif el_sub_status == 2077:
             klipper_state = "complete"
@@ -77,10 +103,9 @@ def map_to_moonraker_format():
             klipper_state = "cancelled"
         else:
             klipper_state = "printing"
-    elif el_status == 1:
-        klipper_state = "standby"
+    elif el_status in [3, 4]:
+        klipper_state = "printing"
 
-    # Robust filename parsing
     filename = elegoo_status_cache.get("print_status", {}).get("filename", "")
     if not filename:
         filename = elegoo_status_cache.get("machine_status", {}).get("filename", "")
@@ -91,12 +116,15 @@ def map_to_moonraker_format():
     return {
         "toolhead": {
             "homed_axes": elegoo_status_cache.get("toolhead", {}).get("homed_axes", "xyz"),
-            "position": [
-                elegoo_status_cache.get("gcode_move_inf", {}).get("x", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("y", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("z", 0.0),
-                elegoo_status_cache.get("gcode_move_inf", {}).get("e", 0.0)
-            ]
+            "position": gcode_position
+        },
+        "gcode_move": {
+            "speed_factor": 1.0,
+            "extrude_factor": 1.0,
+            "gcode_position": gcode_position
+        },
+        "fan": {
+            "speed": fan_speed
         },
         "extruder": {
             "temperature": ext_temp,
@@ -151,6 +179,22 @@ async def broadcast_status_to_websockets():
         except Exception:
             active_websocket_clients.remove(ws)
 
+async def broadcast_gcode_response(text: str):
+    """Broadcasting G-code terminal text replies back to the Obico console interface."""
+    if not active_websocket_clients:
+        return
+    notification = {
+        "jsonrpc": "2.0",
+        "method": "notify_gcode_response",
+        "params": [text]
+    }
+    payload = json.dumps(notification)
+    for ws in list(active_websocket_clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            active_websocket_clients.remove(ws)
+
 # MQTT Callbacks
 def on_connect(client, userdata, flags, rc):
     global mqtt_client_connected
@@ -169,7 +213,7 @@ def on_connect(client, userdata, flags, rc):
         logger.error(f"Could not connect to printer's MQTT. Status code: {rc}")
 
 def on_message(client, userdata, msg):
-    global elegoo_status_cache
+    global elegoo_status_cache, fastapi_loop
     topic = msg.topic
     try:
         payload = json.loads(msg.payload.decode('utf-8'))
@@ -185,17 +229,32 @@ def on_message(client, userdata, msg):
             logger.error(f"Printer rejected registration: {payload.get('error')}")
 
     elif "api_status" in topic or "api_response" in topic:
+        method = payload.get("method")
         result_data = payload.get("result", {})
-        if not result_data:
-            return
-            
-        if payload.get("method") == 1002 or not elegoo_status_cache:
-            elegoo_status_cache = result_data
-            logger.info("Full status report received and cached.")
-        else:
-            deep_merge(elegoo_status_cache, result_data)
         
-        asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
+        # Capture terminal reply
+        if method not in [1002, 1001] and "api_response" in topic:
+            gcode_text = ""
+            if isinstance(result_data, dict) and "ack" in result_data:
+                gcode_text = str(result_data["ack"])
+            elif isinstance(result_data, str):
+                gcode_text = result_data
+            else:
+                gcode_text = f"// elegoo reply: {json.dumps(payload)}"
+                
+            if gcode_text and fastapi_loop:
+                asyncio.run_coroutine_threadsafe(broadcast_gcode_response(gcode_text), fastapi_loop)
+            
+        # Telemetry / Status update
+        if result_data and method in [1002, 1001]:
+            if method == 1002 or not elegoo_status_cache:
+                elegoo_status_cache = result_data
+                logger.info("Full status report received and cached.")
+            else:
+                deep_merge(elegoo_status_cache, result_data)
+            
+            if fastapi_loop:
+                asyncio.run_coroutine_threadsafe(broadcast_status_to_websockets(), fastapi_loop)
 
 def mqtt_heartbeat_loop(mqtt_client):
     while True:
@@ -213,7 +272,6 @@ mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
 # HTTP Endpoints (Moonraker emulation)
-
 @app.get("/access/api_key")
 async def get_api_key():
     return {"result": "elegoo-obico-proxy-dummy-key"}
@@ -231,11 +289,21 @@ async def get_server_info():
         }
     }
 
+# Added Claude's suggested fallback endpoints to prevent metadata errors
+@app.get("/server/history/list")
+async def get_history(limit: int = 1, order: str = "desc"):
+    return {"result": {"jobs": []}}
+
+@app.get("/machine/update/status")
+async def get_update_status(refresh: str = "false"):
+    return {"result": {"version_info": []}}
+
 @app.get("/printer/info")
 async def get_printer_info():
+    # REMOVED local config paths to permanently prevent Obico script-execution loops
     return {
         "result": {
-            "state": map_to_moonraker_format()["print_stats"]["state"],
+            "state": "ready",
             "state_message": "Printer is ready",
             "hostname": "elegoo-cc2",
             "software_version": "v0.12.0-proxy",
@@ -247,7 +315,8 @@ async def get_printer_info():
 async def list_printer_objects():
     return {
         "result": {
-            "objects": ["toolhead", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks"]
+            # FIXED: Added gcode_move and fan to the active object registry list
+            "objects": ["toolhead", "gcode_move", "fan", "extruder", "heater_bed", "print_stats", "display_status", "heaters", "virtual_sdcard", "webhooks"]
         }
     }
 
@@ -255,10 +324,8 @@ async def list_printer_objects():
 async def query_printer_objects():
     return {"result": {"status": map_to_moonraker_format()}}
 
-# --- WEBCAM ENDPOINT ---
 @app.get("/server/webcams/list")
 async def list_webcams():
-    logger.info("Obico requested webcam list. Routing to Elegoo native stream...")
     return {
         "result": {
             "webcams": [
@@ -276,10 +343,8 @@ async def list_webcams():
         }
     }
 
-# --- METADATA & FILES (Stopper feil i Obico) ---
 @app.get("/server/files/metadata")
 async def get_metadata(filename: str = ""):
-    logger.info(f"Obico requested metadata for {filename}")
     return {
         "result": {
             "filename": filename,
@@ -293,7 +358,6 @@ async def get_metadata(filename: str = ""):
 async def get_files_list():
     return {"result": []}
 
-# --- DATABASE ROUTE ---
 @app.get("/server/database/item")
 async def get_database_item(namespace: str = None, key: str = None):
     raise HTTPException(status_code=404, detail="Item not found")
@@ -307,8 +371,6 @@ async def post_database_item(request: Request):
             params.update(body)
     except Exception:
         pass
-    
-    logger.info(f"Obico safely saved a database item to proxy: {params}")
     return {
         "result": {
             "namespace": params.get("namespace", "obico"),
@@ -317,7 +379,6 @@ async def post_database_item(request: Request):
         }
     }
 
-# --- G-KODE MOTOR FOR TERMINAL OG KONTROLLER (BÅDE GET OG POST) ---
 @app.get("/printer/gcode/script")
 @app.post("/printer/gcode/script")
 async def execute_gcode(request: Request, script: str = None):
@@ -330,34 +391,28 @@ async def execute_gcode(request: Request, script: str = None):
             
     if script:
         logger.info(f"Obico sent G-code command: {script}")
-        # Standard G-kode wrapper for MQTT Klipper API
         cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
         mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
-# Control Endpoints for Obico
 @app.post("/printer/print/pause")
 async def print_pause():
-    logger.info("Received PAUSE command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1021, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/resume")
 async def print_resume():
-    logger.info("Received RESUME command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
 @app.post("/printer/print/cancel")
 async def print_cancel():
-    logger.info("Received CANCEL command from Obico.")
     cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
     mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
     return {"result": "ok"}
 
-# WebSocket Endpoint for Obico RPC communication
 @app.websocket("/websocket")
 @app.websocket("/server/websocket")
 async def websocket_endpoint(websocket: WebSocket):
@@ -402,6 +457,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         "result": {
                             "state": map_to_moonraker_format()["print_stats"]["state"]
                         },
+                        "id": msg_id
+                    }))
+                # Suppress warnings for informational remote RPC calls (Claude approved)
+                elif method in ["connection.register_remote_method", "server.connection.identify"]:
+                    await websocket.send_text(json.dumps({
+                        "jsonrpc": "2.0",
+                        "result": "ok",
                         "id": msg_id
                     }))
             except Exception:
