@@ -498,6 +498,11 @@ async def upload_file(request: Request):
     try:
         async for _ in request.stream():
             pass
+@app.post("/server/files/upload")
+async def upload_file(request: Request):
+    try:
+        async for _ in request.stream():
+            pass
     except Exception:
         pass
     return {"result": {"file": ""}}
