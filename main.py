@@ -12,6 +12,7 @@ from threading import RLock
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
 import urllib.request
+import aiohttp
 import paho.mqtt.client as mqtt
 import uvicorn
 
@@ -389,28 +390,25 @@ async def camera_snapshot():
 
 @app.get("/camera/stream")
 async def camera_stream():
-    """Tunnelerer live MJPEG-videostrømmen direkte ved behov."""
+    """Tunnelerer live MJPEG-videostrømmen async via aiohttp (blokkerer ikke event-loopen)."""
     url = f"http://{PRINTER_IP}:8080/?action=stream"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        response = urllib.request.urlopen(req, timeout=10)
-        content_type = response.headers.get("Content-Type", "multipart/x-mixed-replace; boundary=boundarydonotcross")
-        
-        def iter_stream():
-            try:
-                while True:
-                    chunk = response.read(4096)
-                    if not chunk:
-                        break
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
+    async def stream_generator():
+        session = aiohttp.ClientSession()
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                content_type = resp.content_type or "multipart/x-mixed-replace"
+                async for chunk in resp.content.iter_chunked(4096):
                     yield chunk
-            except Exception as e:
-                logger.error(f"Strømavbrudd under overføring: {e}")
-            finally:
-                response.close()
-                
-        return StreamingResponse(iter_stream(), media_type=content_type)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Klarte ikke å koble til live-strøm: {e}")
+        except asyncio.CancelledError:
+            logger.info("Klient disconnectet fra video-strøm.")
+        except Exception as e:
+            logger.error(f"Strømavbrudd under overføring: {e}")
+        finally:
+            await session.close()
+
+    return StreamingResponse(stream_generator(), media_type="multipart/x-mixed-replace; boundary=boundarydonotcross")
 
 @app.get("/machine/device_power/devices")
 async def get_device_power_devices():
