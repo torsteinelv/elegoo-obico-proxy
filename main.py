@@ -317,15 +317,17 @@ async def post_database_item(request: Request):
         }
     }
 
-# --- NY RUTE: G-KODE MOTOR FOR TERMINAL OG KONTROLLER ---
+# --- G-KODE MOTOR FOR TERMINAL OG KONTROLLER (BÅDE GET OG POST) ---
+@app.get("/printer/gcode/script")
 @app.post("/printer/gcode/script")
-async def execute_gcode(request: Request):
-    try:
-        body = await request.json()
-        script = body.get("script", "")
-    except Exception:
-        script = ""
-        
+async def execute_gcode(request: Request, script: str = None):
+    if not script:
+        try:
+            body = await request.json()
+            script = body.get("script", "")
+        except Exception:
+            pass
+            
     if script:
         logger.info(f"Obico sent G-code command: {script}")
         # Standard G-kode wrapper for MQTT Klipper API
