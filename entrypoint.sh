@@ -18,7 +18,8 @@ host = 127.0.0.1
 port = 7125
 
 [logging]
-path = /app/logs
+# Changed from /app/logs to point to a specific file:
+path = /app/logs/moonraker-obico.log
 level = info
 EOF
 
