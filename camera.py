@@ -5,7 +5,7 @@ import urllib.request
 import aiohttp
 import asyncio
 from fastapi import HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 from state import (
     PRINTER_IP, latest_live_frame, latest_frame_timestamp,
     latest_frame_lock, logger
@@ -14,46 +14,98 @@ from state import (
 
 # --- Bakgrunnstråd som cacher MJPEG-strøm ---
 def webcam_stream_cache_worker():
-    """Holder én stabil tilkobling til printeren, leser streamen og lagrer siste bilde i RAM."""
+    """Holder stabil tilkobling til printeren, leser streamen og lagrer siste bilde i RAM.
+
+    Bruker aiohttp i en bakgrunnstråd via asyncio loop for å unngå blocking I/O.
+    """
     global latest_live_frame
+
     url = f"http://{PRINTER_IP}:8080/?action=stream"
+    boundary = b"--boundarydonotcross\r\n"
 
-    while True:
+    def _run_async():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            logger.info("Kobler til Elegoo MJPEG-strømmen i bakgrunnen...")
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0',
-                'Connection': 'keep-alive'
-            })
-            with urllib.request.urlopen(req, timeout=15) as response:
-                buffer = b""
-                while True:
-                    chunk = response.read(4096)
-                    if not chunk:
-                        break
-                    buffer += chunk
+            loop.run_until_complete(_cache_worker_loop(loop, url, boundary))
+        except Exception:
+            logger.exception("Bakgrunnstråd feilet")
 
-                    while True:
-                        start = buffer.find(b"\xff\xd8")
-                        if start == -1:
-                            break
-                        end = buffer.find(b"\xff\xd9", start)
-                        if end == -1:
-                            break
+    def _cache_worker_loop(loop, url, boundary):
+        """Async loop som holder én tilkobling og parser MJPEG frames."""
+        session = aiohttp.ClientSession()
+        try:
+            while True:
+                try:
+                    logger.info("Kobler til Elegoo MJPEG-strømmen i bakgrunnen...")
+                    timeout = aiohttp.ClientTimeout(total=60, connect=10)
+                    async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'},
+                                           timeout=timeout) as resp:
+                        logger.info("MJPEG-strøm tilkoblet, leser frames...")
+                        buffer = b""
+                        frame_count = 0
+                        async for chunk in resp.content.iter_chunked(8192):
+                            buffer += chunk
+                            while True:
+                                start = buffer.find(b"\xff\xd8")
+                                if start == -1:
+                                    break
+                                end = buffer.find(b"\xff\xd9", start)
+                                if end == -1:
+                                    break
+                                frame = buffer[start:end + 2]
+                                buffer = buffer[end + 2:]
 
-                        frame = buffer[start:end+2]
-                        buffer = buffer[end+2:]
+                                with latest_frame_lock:
+                                    latest_live_frame = frame
+                                    latest_frame_timestamp = time.time()
+                                frame_count += 1
 
-                        with latest_frame_lock:
-                            latest_live_frame = frame
-        except Exception as e:
-            logger.error(f"Kameratilkobling feilet i bakgrunnen: {e}. Prøver på nytt om 3 sekunder...")
-            time.sleep(3)
+                        logger.info(f"Strøm brøt av etter {frame_count} frames. Prøver å koble på nytt...")
+                        time.sleep(3)
+                except asyncio.CancelledError:
+                    logger.info("Cache worker avbrutt")
+                    break
+                except aiohttp.ClientError as e:
+                    logger.error(f"MJPEG tilkobling feilet: {e}. Prøver på nytt om 3 sekunder...")
+                    time.sleep(3)
+                except Exception:
+                    logger.exception("Uventet feil i cache worker")
+                    time.sleep(3)
+        finally:
+            loop.run_until_complete(session.close())
+
+    # Start async worker i egen tråd med egen event loop
+    worker_thread = threading.Thread(target=_run_async, daemon=True, name="mjpeg-cache")
+    worker_thread.start()
 
 
 # --- HTTP-endepunkter ---
 def register_camera_routes(app):
     """Registrer kamera-relaterte HTTP-endepunkter på FastAPI-appen."""
+
+    @app.get("/webcam")
+    async def get_webcam():
+        """OctoPrint-standard webcam config endpoint.
+
+        moonraker-obico calls GET /webcam to discover webcams.
+        Returns the same config as /server/webcams/list but in
+        the OctoPrint-compatible format.
+        """
+        return {
+            "result": {
+                "webcams": [{
+                    "name": "Elegoo Camera",
+                    "service": "mjpeg_adaptive",
+                    "target_fps": 15,
+                    "stream_url": "http://127.0.0.1:7125/camera/stream",
+                    "snapshot_url": "http://127.0.0.1:7125/camera/snapshot",
+                    "flip_horizontal": False,
+                    "flip_vertical": False,
+                    "rotation": 0
+                }]
+            }
+        }
 
     @app.get("/server/webcams/list")
     async def list_webcams():
@@ -73,7 +125,7 @@ def register_camera_routes(app):
         }
 
     @app.get("/server/webcams/get")
-    async def get_webcam(name: str = None):
+    async def get_webcam_by_name(name: str = None):
         return {
             "result": {
                 "name": name or "Elegoo Camera",
@@ -100,7 +152,7 @@ def register_camera_routes(app):
                 headers={
                     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                     "Pragma": "no-cache",
-                    "Expires": "0"
+                    "Expires": 0
                 }
             )
         raise HTTPException(status_code=502, detail="Kamera-cache er ikke klar ennå")
@@ -119,10 +171,10 @@ def register_camera_routes(app):
         async def stream_generator():
             session = aiohttp.ClientSession()
             try:
-                async with session.get(url, headers=headers,
-                                       timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                timeout = aiohttp.ClientTimeout(total=60, connect=10)
+                async with session.get(url, headers=headers, timeout=timeout) as resp:
                     buffer = b""
-                    async for chunk in resp.content.iter_chunked(4096):
+                    async for chunk in resp.content.iter_chunked(8192):
                         buffer += chunk
                         while True:
                             start = buffer.find(b"\xff\xd8")
@@ -131,8 +183,8 @@ def register_camera_routes(app):
                             end = buffer.find(b"\xff\xd9", start)
                             if end == -1:
                                 break
-                            frame = buffer[start:end+2]
-                            buffer = buffer[end+2:]
+                            frame = buffer[start:end + 2]
+                            buffer = buffer[end + 2:]
                             yield boundary
                             yield frame
                             if not frame.endswith(b"\r\n"):
