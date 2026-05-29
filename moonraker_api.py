@@ -288,6 +288,15 @@ def register_routes(app: FastAPI):
                     elif method == "printer.gcode.script":
                         script = msg.get("params", {}).get("script", "")
                         if script:
+                            if state.mqtt_client is None:
+                                await websocket.send_text(
+                                    json.dumps({
+                                        "jsonrpc": "2.0",
+                                        "error": {"code": -32603, "message": "MQTT client not ready"},
+                                        "id": msg_id,
+                                    })
+                                )
+                                continue
                             cmd = {
                                 "id": random.randint(1000, 9999),
                                 "method": 1008,
