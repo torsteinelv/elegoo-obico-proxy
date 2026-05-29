@@ -219,6 +219,222 @@ def register_routes(app: FastAPI):
             "mapped_to_moonraker": map_to_moonraker_format(),
         }
 
+    # --- OctoPrint-kompatible endepunkter (kalt av moonraker-obico client) ---
+
+    @app.get("/api/v1/octo/")
+    async def octo_root():
+        return {"version": "proxy", "online": True}
+
+    @app.get("/api/v1/octo/job")
+    async def octo_job():
+        with elegoo_status_lock:
+            print_stats = elegoo_status_cache.get("print_stats", {})
+            display_stats = elegoo_status_cache.get("display_status", {})
+        state_val = print_stats.get("state", "offline")
+        return {
+            "job": {
+                "state": state_val,
+                "printTime": print_stats.get("print_duration", 0) or 0,
+                "printTimeLeft": None,
+                "printTimeRemaining": None,
+                "file": {"name": print_stats.get("filename", "") or ""},
+                "filamentTotal": print_stats.get("filament_used", 0) or 0,
+                "filamentUsed": print_stats.get("filament_used", 0) or 0,
+            },
+            "printProgress": print_stats.get("progress", 0) or 0,
+            "state": state_val,
+            "error": "",
+            "warnings": [],
+            "closedOrError": state_val in ("shutdown", "error"),
+        }
+
+    @app.get("/api/v1/octo/print")
+    async def octo_print():
+        with elegoo_status_lock:
+            print_stats = elegoo_status_cache.get("print_stats", {})
+        state_val = print_stats.get("state", "offline")
+        return {"state": state_val, "error": "", "closedOrError": state_val in ("shutdown", "error")}
+
+    @app.post("/api/v1/octo/print")
+    async def octo_print_post(request: Request):
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        action = body.get("command", "")
+        if action == "start":
+            cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
+            if state.mqtt_client is not None:
+                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        elif action == "pause":
+            pause_action = body.get("action", "")
+            method = 1021 if pause_action == "pause" else (1023 if pause_action == "resume" else 1021)
+            cmd = {"id": random.randint(1000, 9999), "method": method, "params": {}}
+            if state.mqtt_client is not None:
+                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        elif action == "cancel":
+            cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
+            if state.mqtt_client is not None:
+                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        return {"state": "ok"}
+
+    @app.get("/api/v1/octo/g_code_files/")
+    async def octo_g_code_files_get():
+        return {"files": []}
+
+    @app.post("/api/v1/octo/g_code_files/")
+    async def octo_g_code_files_post(request: Request):
+        try:
+            body = await request.json()
+            logger.debug(f"Received g_code_files update: {body}")
+        except Exception:
+            logger.warning("Received g_code_files/ post with invalid body")
+        return {"saved": True}
+
+    @app.get("/api/v1/octo/g_code_files/{filename:path}")
+    async def octo_g_code_files_file(filename: str):
+        return {"file": {"name": filename, "path": filename, "size": 0, "date": int(time.time())}}
+
+    @app.post("/api/v1/octo/g_code_files/{filename:path}")
+    async def octo_g_code_files_file_post(request: Request, filename: str):
+        try:
+            body = await request.json()
+            logger.debug(f"Received g_code_files/{filename} update: {body}")
+        except Exception:
+            pass
+        return {"saved": True}
+
+    @app.delete("/api/v1/octo/g_code_files/{filename:path}")
+    async def octo_g_code_files_file_delete(filename: str):
+        logger.debug(f"Received g_code_files/{filename} delete request")
+        return {"removed": True}
+
+    @app.get("/api/v1/octo/pic/")
+    async def octo_pic():
+        with latest_frame_lock:
+            frame_data = latest_live_frame
+        if not frame_data:
+            return {"error": "No frame available"}, 404
+        import base64
+        return {"pic": base64.b64encode(frame_data).decode("utf-8")}
+
+    @app.get("/api/v1/octo/temperatures")
+    async def octo_temperatures():
+        with elegoo_status_lock:
+            status = map_to_moonraker_format()
+        extruder = status.get("extruder", {})
+        heater_bed = status.get("heater_bed", {})
+        return {
+            "print": {"hotend_temp": extruder.get("temperature", 0) or 0},
+            "bed": {"bed_temp": heater_bed.get("temperature", 0) or 0},
+            "temps": extruder.get("target", 0) or 0,
+            "bed_temps": heater_bed.get("target", 0) or 0,
+            "state": "Ready",
+        }
+
+    @app.get("/api/v1/octo/files")
+    async def octo_files():
+        return {"files": []}
+
+    @app.post("/api/v1/octo/files")
+    async def octo_files_post(request: Request):
+        return {"saved": True}
+
+    @app.get("/api/v1/octo/files/{filename:path}")
+    async def octo_file(filename: str):
+        return {"file": {"name": filename, "path": filename, "size": 0, "date": int(time.time())}}
+
+    @app.post("/api/v1/octo/files/{filename:path}")
+    async def octo_file_post(request: Request, filename: str):
+        return {"saved": True}
+
+    @app.delete("/api/v1/octo/files/{filename:path}")
+    async def octo_file_delete(filename: str):
+        return {"removed": True}
+
+    @app.get("/api/v1/octo/printer")
+    async def octo_printer():
+        return {"name": "Elegoo CC2", "type": "3dprinter"}
+
+    @app.post("/api/v1/octo/printer")
+    async def octo_printer_post(request: Request):
+        return {"name": "Elegoo CC2"}
+
+    @app.get("/api/v1/octo/printer/command")
+    async def octo_printer_command():
+        return {"command": "ok"}
+
+    @app.post("/api/v1/octo/printer/command")
+    async def octo_printer_command_post(request: Request):
+        return {"command": "ok"}
+
+    @app.get("/api/v1/octo/authorization/check")
+    async def octo_auth_check():
+        return {"authenticated": True}
+
+    @app.get("/api/v1/octo/timelapse/")
+    async def octo_timelapse():
+        return {"result": "ok"}
+
+    @app.post("/api/v1/octo/timelapse/")
+    async def octo_timelapse_post():
+        return {"result": "ok"}
+
+    @app.get("/api/v1/octo/completion")
+    async def octo_completion():
+        return {"completion": {}}
+
+    @app.post("/api/v1/octo/completion")
+    async def octo_completion_post(request: Request):
+        return {"result": "ok"}
+
+    @app.get("/api/v1/octo/event")
+    async def octo_event():
+        return {"events": []}
+
+    @app.post("/api/v1/octo/event")
+    async def octo_event_post(request: Request):
+        return {"result": "ok"}
+
+    @app.get("/api/v1/octo/profiles/printer")
+    async def octo_printer_profiles():
+        return {"profiles": [{"name": "default", "vendor": "elegoo", "model": "cc2", "customProfile": False}]}
+
+    @app.post("/api/v1/octo/profiles/printer")
+    async def octo_printer_profiles_post(request: Request):
+        return {"name": "default"}
+
+    @app.get("/api/v1/octo/profiles/temperatures")
+    async def octo_temp_profiles():
+        return {"profiles": []}
+
+    @app.get("/api/v1/octo/profiles/feeds")
+    async def octo_feed_profiles():
+        return {"profiles": []}
+
+    @app.get("/api/v1/octo/profiles/timezone")
+    async def octo_tz_profiles():
+        return {"profiles": []}
+
+    @app.get("/api/v1/octo/profiles/management")
+    async def octo_mgmt_profiles():
+        return {"profiles": []}
+
+    @app.get("/api/v1/octo/logs")
+    async def octo_logs():
+        return {"logs": []}
+
+    @app.get("/api/v1/octo/virtual_printer")
+    async def octo_virtual_printer():
+        return {"virtual_printer": False}
+
+    @app.post("/api/v1/octo/virtual_printer")
+    async def octo_virtual_printer_post(request: Request):
+        return {"virtual_printer": False}
+
+    # --- Slutt på OctoPrint-kompatible endepunkter ---
+
     @app.websocket("/websocket")
     @app.websocket("/server/websocket")
     async def websocket_endpoint(websocket: WebSocket):
