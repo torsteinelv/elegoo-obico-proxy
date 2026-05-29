@@ -37,6 +37,7 @@ fastapi_loop = None
 
 # Global kamera-cache (RAM) for å beskytte printeren mot overbelastning
 latest_live_frame = b""
+latest_frame_timestamp = 0.0
 latest_frame_lock = RLock()
 
 # Generate valid IDs matching Elegoo's official web interface format
@@ -372,13 +373,16 @@ async def get_webcam(name: str = None):
 
 @app.get("/camera/snapshot")
 async def camera_snapshot():
-    """Serverer det ferskeste bildet superraskt direkte fra RAM-cache uten å røre printeren."""
+    """Serverer det ferskeste bildet fra cache, med fallback til printeren."""
     with latest_frame_lock:
         frame = latest_live_frame
-        
-    if frame:
+        frame_ts = latest_frame_timestamp
+
+    now = time.time()
+    if frame and (now - frame_ts) < 30.0:
+        # Cache er fersk — returner direkte
         return Response(
-            content=frame, 
+            content=frame,
             media_type="image/jpeg",
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -386,21 +390,67 @@ async def camera_snapshot():
                 "Expires": "0"
             }
         )
-    raise HTTPException(status_code=502, detail="Kamera-cache er ikke klar ennå")
+
+    # Cache er tom eller gammel — hent direkte fra printeren
+    try:
+        url = f"http://{PRINTER_IP}:8080/?action=snapshot"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read()
+        if data and data.startswith(b"\xff\xd8") and b"\xff\xd9" in data:
+            # Oppdater cache med det vi nettopp hentet
+            with latest_frame_lock:
+                latest_live_frame = data
+                latest_frame_timestamp = now
+            return Response(
+                content=data,
+                media_type="image/jpeg",
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0"
+                }
+            )
+    except Exception as e:
+        logger.error(f"Kunne ikke hente snapshot fra printer: {e}")
+    raise HTTPException(status_code=502, detail="Kunne ikke hente snapshot fra printeren")
 
 @app.get("/camera/stream")
 async def camera_stream():
-    """Tunnelerer live MJPEG-videostrømmen async via aiohttp (blokkerer ikke event-loopen)."""
+    """Proxyer live MJPEG-strømmen async via aiohttp med riktig boundary-format.
+
+    moonraker-obico leser streamen line-by-line (readline) og forventer
+    multipart/x-mixed-replace med --boundary-linjer mellom hver JPEG-frame.
+    Vi må derfor buffere rå bytes og emitte komplette frames med \\r\\n-boundaries.
+    """
     url = f"http://{PRINTER_IP}:8080/?action=stream"
     headers = {'User-Agent': 'Mozilla/5.0'}
+    boundary = b"--boundarydonotcross\r\n"
 
     async def stream_generator():
         session = aiohttp.ClientSession()
         try:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                content_type = resp.content_type or "multipart/x-mixed-replace"
+                buffer = b""
                 async for chunk in resp.content.iter_chunked(4096):
-                    yield chunk
+                    buffer += chunk
+                    # Let etter komplette JPEG-frames i bufferen
+                    while True:
+                        start = buffer.find(b"\xff\xd8")
+                        if start == -1:
+                            break
+                        end = buffer.find(b"\xff\xd9", start)
+                        if end == -1:
+                            break
+                        # Vi fant en komplett JPEG-frame (inkl. SOI/EOI)
+                        frame = buffer[start:end+2]
+                        buffer = buffer[end+2:]
+                        # Emit frame med MJPEG boundary format som moonraker-obico forventer
+                        yield boundary
+                        yield frame
+                        # Sørg for at frame slutter med \r\n før neste boundary
+                        if not frame.endswith(b"\r\n"):
+                            yield b"\r\n"
         except asyncio.CancelledError:
             logger.info("Klient disconnectet fra video-strøm.")
         except Exception as e:
