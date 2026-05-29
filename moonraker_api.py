@@ -228,8 +228,8 @@ def register_routes(app: FastAPI):
     @app.get("/api/v1/octo/job")
     async def octo_job():
         with elegoo_status_lock:
-            print_stats = elegoo_status_cache.get("print_stats", {})
-            display_stats = elegoo_status_cache.get("display_status", {})
+            status = map_to_moonraker_format()
+        print_stats = status.get("print_stats", {})
         state_val = print_stats.get("state", "offline")
         return {
             "job": {
@@ -251,12 +251,16 @@ def register_routes(app: FastAPI):
     @app.get("/api/v1/octo/print")
     async def octo_print():
         with elegoo_status_lock:
-            print_stats = elegoo_status_cache.get("print_stats", {})
+            status = map_to_moonraker_format()
+        print_stats = status.get("print_stats", {})
         state_val = print_stats.get("state", "offline")
         return {"state": state_val, "error": "", "closedOrError": state_val in ("shutdown", "error")}
 
     @app.post("/api/v1/octo/print")
     async def octo_print_post(request: Request):
+        if state.mqtt_client is None:
+            logger.warning("Cannot handle print command: MQTT client not initialized yet")
+            return {"state": "error", "message": "MQTT client not ready"}
         body = {}
         try:
             body = await request.json()
@@ -265,18 +269,15 @@ def register_routes(app: FastAPI):
         action = body.get("command", "")
         if action == "start":
             cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
-            if state.mqtt_client is not None:
-                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+            state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
         elif action == "pause":
             pause_action = body.get("action", "")
             method = 1021 if pause_action == "pause" else (1023 if pause_action == "resume" else 1021)
             cmd = {"id": random.randint(1000, 9999), "method": method, "params": {}}
-            if state.mqtt_client is not None:
-                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+            state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
         elif action == "cancel":
             cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
-            if state.mqtt_client is not None:
-                state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+            state.mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
         return {"state": "ok"}
 
     @app.get("/api/v1/octo/g_code_files/")
@@ -315,7 +316,8 @@ def register_routes(app: FastAPI):
         with latest_frame_lock:
             frame_data = latest_live_frame
         if not frame_data:
-            return {"error": "No frame available"}, 404
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"error": "No frame available"})
         import base64
         return {"pic": base64.b64encode(frame_data).decode("utf-8")}
 
