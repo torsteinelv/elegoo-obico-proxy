@@ -142,7 +142,7 @@ def register_camera_routes(app):
                 headers={
                     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                     "Pragma": "no-cache",
-                    "Expires": 0
+                    "Expires": "0"
                 }
             )
         raise HTTPException(status_code=502, detail="Kamera-cache er ikke klar ennå")
