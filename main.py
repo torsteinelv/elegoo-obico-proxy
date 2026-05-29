@@ -7,12 +7,14 @@ Startopp:
   4. Koble opp MQTT mot printeren
   5. Start uvicorn på port 7125
 """
+import asyncio
 import sys
 import threading
 
 import uvicorn
 from fastapi import FastAPI
 
+import state
 from state import (
     PRINTER_IP,
     logger,
@@ -28,6 +30,12 @@ from moonraker_api import register_routes as register_moonraker_routes
 
 # --- App ---
 app = FastAPI(title="Elegoo CC2 Obico Proxy")
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Fang den kjørende event-loopen slik at MQTT-callbacken kan broadcaste."""
+    state.fastapi_loop = asyncio.get_running_loop()
 
 
 def main() -> None:
@@ -46,6 +54,8 @@ def main() -> None:
         mqtt_client.connect(PRINTER_IP, 1883, 60)
         threading.Thread(target=mqtt_client.loop_forever, daemon=True).start()
         threading.Thread(target=mqtt_heartbeat_loop, args=(mqtt_client,), daemon=True).start()
+        # Lagre klienten i state slik at moonraker_api.py kan bruke den
+        state.mqtt_client = mqtt_client
     except Exception as e:
         logger.error("Critical error: Could not start MQTT connection: %s", e)
         sys.exit(1)
