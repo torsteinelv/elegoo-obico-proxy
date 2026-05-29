@@ -1,15 +1,11 @@
 """Kamera-bakgrunnstråd og HTTP-endepunkter for video."""
 import time
 import threading
-import urllib.request
 import aiohttp
 import asyncio
 from fastapi import HTTPException
-from fastapi.responses import Response, StreamingResponse, JSONResponse
-from state import (
-    PRINTER_IP, latest_live_frame, latest_frame_timestamp,
-    latest_frame_lock, logger
-)
+from fastapi.responses import Response, StreamingResponse
+import state
 
 
 # --- Bakgrunnstråd som cacher MJPEG-strøm ---
@@ -18,23 +14,21 @@ def webcam_stream_cache_worker():
 
     Bruker aiohttp i en bakgrunnstråd via asyncio loop for å unngå blocking I/O.
     """
-    global latest_live_frame
-
-    url = f"http://{PRINTER_IP}:8080/?action=stream"
-    boundary = b"--boundarydonotcross\r\n"
+    url = f"http://{state.PRINTER_IP}:8080/?action=stream"
 
     def _run_async():
+        logger = state.logger
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(_cache_worker_loop(loop, url, boundary))
+            loop.run_until_complete(_cache_worker_loop(loop, url))
         except Exception:
             logger.exception("Bakgrunnstråd feilet")
 
-    def _cache_worker_loop(loop, url, boundary):
+    async def _cache_worker_loop(loop, url):
         """Async loop som holder én tilkobling og parser MJPEG frames."""
-        session = aiohttp.ClientSession()
-        try:
+        logger = state.logger
+        async with aiohttp.ClientSession() as session:
             while True:
                 try:
                     logger.info("Kobler til Elegoo MJPEG-strømmen i bakgrunnen...")
@@ -56,24 +50,22 @@ def webcam_stream_cache_worker():
                                 frame = buffer[start:end + 2]
                                 buffer = buffer[end + 2:]
 
-                                with latest_frame_lock:
-                                    latest_live_frame = frame
-                                    latest_frame_timestamp = time.time()
+                                with state.latest_frame_lock:
+                                    state.latest_live_frame = frame
+                                    state.latest_frame_timestamp = time.time()
                                 frame_count += 1
 
                         logger.info(f"Strøm brøt av etter {frame_count} frames. Prøver å koble på nytt...")
-                        time.sleep(3)
+                        await asyncio.sleep(3)
                 except asyncio.CancelledError:
                     logger.info("Cache worker avbrutt")
                     break
                 except aiohttp.ClientError as e:
                     logger.error(f"MJPEG tilkobling feilet: {e}. Prøver på nytt om 3 sekunder...")
-                    time.sleep(3)
+                    await asyncio.sleep(3)
                 except Exception:
                     logger.exception("Uventet feil i cache worker")
-                    time.sleep(3)
-        finally:
-            loop.run_until_complete(session.close())
+                    await asyncio.sleep(3)
 
     # Start async worker i egen tråd med egen event loop
     worker_thread = threading.Thread(target=_run_async, daemon=True, name="mjpeg-cache")
@@ -88,9 +80,7 @@ def register_camera_routes(app):
     async def get_webcam():
         """OctoPrint-standard webcam config endpoint.
 
-        moonraker-obico calls GET /webcam to discover webcams.
-        Returns the same config as /server/webcams/list but in
-        the OctoPrint-compatible format.
+        moonraker-obico kaller GET /webcam for å oppdage webkameraer.
         """
         return {
             "result": {
@@ -142,8 +132,8 @@ def register_camera_routes(app):
     @app.get("/camera/snapshot")
     async def camera_snapshot():
         """Serverer det ferskeste bildet fra cache."""
-        with latest_frame_lock:
-            frame = latest_live_frame
+        with state.latest_frame_lock:
+            frame = state.latest_live_frame
 
         if frame:
             return Response(
@@ -164,7 +154,7 @@ def register_camera_routes(app):
         moonraker-obico leser streamen line-by-line (readline) og forventer
         multipart/x-mixed-replace med --boundary-linjer mellom hver JPEG-frame.
         """
-        url = f"http://{PRINTER_IP}:8080/?action=stream"
+        url = f"http://{state.PRINTER_IP}:8080/?action=stream"
         headers = {'User-Agent': 'Mozilla/5.0'}
         boundary = b"--boundarydonotcross\r\n"
 
@@ -190,9 +180,9 @@ def register_camera_routes(app):
                             if not frame.endswith(b"\r\n"):
                                 yield b"\r\n"
             except asyncio.CancelledError:
-                logger.info("Klient disconnectet fra video-strøm.")
+                state.logger.info("Klient disconnectet fra video-strøm.")
             except Exception as e:
-                logger.error(f"Strømavbrudd under overføring: {e}")
+                state.logger.error(f"Strømavbrudd under overføring: {e}")
             finally:
                 await session.close()
 
