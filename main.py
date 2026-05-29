@@ -374,6 +374,8 @@ async def get_webcam(name: str = None):
 @app.get("/camera/snapshot")
 async def camera_snapshot():
     """Serverer det ferskeste bildet fra cache, med fallback til printeren."""
+    global latest_live_frame
+    global latest_frame_timestamp
     with latest_frame_lock:
         frame = latest_live_frame
         frame_ts = latest_frame_timestamp
