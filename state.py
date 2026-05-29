@@ -40,6 +40,9 @@ active_ws_lock = RLock()
 mqtt_client_connected = False
 fastapi_loop = None
 
+# --- MQTT-klient (deltes på tvers av moduler) ---
+mqtt_client = None
+
 # --- Kamera-cache (RAM) for å beskytte printeren mot overbelastning ---
 latest_live_frame = b""
 latest_frame_timestamp = 0.0

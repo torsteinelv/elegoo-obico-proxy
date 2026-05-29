@@ -2,9 +2,22 @@
 import json
 import random
 import time
+
+import state
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from state import elegoo_status_lock, active_websocket_clients, active_ws_lock, logger
-from mqtt_client import map_to_moonraker_format, broadcast_status_to_websockets, mqtt_client
+from mqtt_client import map_to_moonraker_format, broadcast_status_to_websockets
+from state import (
+    CLIENT_ID,
+    SERIAL_NUMBER,
+    active_websocket_clients,
+    active_ws_lock,
+    elegoo_status_cache,
+    elegoo_status_lock,
+    latest_frame_lock,
+    latest_live_frame,
+    logger,
+    mqtt_client_connected,
+)
 
 
 def register_routes(app: FastAPI):
@@ -23,17 +36,17 @@ def register_routes(app: FastAPI):
                 "klippy_connected": True,
                 "components": ["machine", "file_manager", "metadata"],
                 "failed_components": [],
-                "moonraker_version": "v0.12.0-proxy"
+                "moonraker_version": "v0.12.0-proxy",
             }
         }
 
     @app.get("/printer/info")
     async def get_printer_info():
         with elegoo_status_lock:
-            state = map_to_moonraker_format()["print_stats"]["state"]
+            printer_state = map_to_moonraker_format()["print_stats"]["state"]
         return {
             "result": {
-                "state": state,
+                "state": printer_state,
                 "state_message": "Printer is ready",
                 "hostname": "elegoo-cc2",
                 "software_version": "v0.12.0-proxy",
@@ -41,7 +54,7 @@ def register_routes(app: FastAPI):
                 "klipper_path": "/home/pi/klipper",
                 "python_path": "/home/pi/klippy-env/bin/python",
                 "log_file": "/tmp/klippy.log",
-                "config_file": "/home/pi/klipper_config/printer.cfg"
+                "config_file": "/home/pi/klipper_config/printer.cfg",
             }
         }
 
@@ -50,11 +63,18 @@ def register_routes(app: FastAPI):
         return {
             "result": {
                 "objects": [
-                    "toolhead", "extruder", "heater_bed", "print_stats",
-                    "display_status", "heaters", "virtual_sdcard", "webhooks",
-                    "gcode_move", "fan",
+                    "toolhead",
+                    "extruder",
+                    "heater_bed",
+                    "print_stats",
+                    "display_status",
+                    "heaters",
+                    "virtual_sdcard",
+                    "webhooks",
+                    "gcode_move",
+                    "fan",
                     "gcode_macro _OBICO_LAYER_CHANGE",
-                    "gcode_macro TIMELAPSE_TAKE_FRAME"
+                    "gcode_macro TIMELAPSE_TAKE_FRAME",
                 ]
             }
         }
@@ -76,7 +96,7 @@ def register_routes(app: FastAPI):
                 "filename": filename,
                 "size": 1000000,
                 "modified": time.time(),
-                "thumbnails": []
+                "thumbnails": [],
             }
         }
 
@@ -86,16 +106,19 @@ def register_routes(app: FastAPI):
 
     @app.get("/server/database/item")
     async def get_database_item(namespace: str = None, key: str = None):
-        return {"result": {"namespace": namespace or "", "key": key or "", "value": {}}}
+        return {
+            "result": {"namespace": namespace or "", "key": key or "", "value": {}}
+        }
 
     @app.post("/server/database/item")
     async def post_database_item(request: Request):
-        return {"result": {"namespace": "obico", "key": "printer_id", "value": 1}}
+        return {
+            "result": {"namespace": "obico", "key": "printer_id", "value": 1}
+        }
 
     @app.get("/printer/gcode/script")
     @app.post("/printer/gcode/script")
     async def execute_gcode(request: Request, script: str = None):
-        from state import SERIAL_NUMBER, CLIENT_ID
         if not script:
             try:
                 body = await request.json()
@@ -103,29 +126,51 @@ def register_routes(app: FastAPI):
             except Exception:
                 pass
         if script:
-            cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
-            mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+            cmd = {
+                "id": random.randint(1000, 9999),
+                "method": 1008,
+                "params": {"command": script},
+            }
+            if state.mqtt_client is None:
+                logger.warning("Cannot send gcode script: MQTT client not initialized yet")
+                return {"result": "error", "message": "MQTT client not ready"}
+            state.mqtt_client.publish(
+                f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request",
+                json.dumps(cmd),
+            )
         return {"result": "ok"}
 
     @app.post("/printer/print/pause")
     async def print_pause():
-        from state import SERIAL_NUMBER, CLIENT_ID
+        if state.mqtt_client is None:
+            logger.warning("Cannot pause: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1021, "params": {}}
-        mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        state.mqtt_client.publish(
+            f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
+        )
         return {"result": "ok"}
 
     @app.post("/printer/print/resume")
     async def print_resume():
-        from state import SERIAL_NUMBER, CLIENT_ID
+        if state.mqtt_client is None:
+            logger.warning("Cannot resume: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
-        mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        state.mqtt_client.publish(
+            f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
+        )
         return {"result": "ok"}
 
     @app.post("/printer/print/cancel")
     async def print_cancel():
-        from state import SERIAL_NUMBER, CLIENT_ID
+        if state.mqtt_client is None:
+            logger.warning("Cannot cancel: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
-        mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
+        state.mqtt_client.publish(
+            f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
+        )
         return {"result": "ok"}
 
     @app.get("/server/history/list")
@@ -134,7 +179,14 @@ def register_routes(app: FastAPI):
 
     @app.get("/server/history/stats")
     async def get_history_stats():
-        return {"result": {"total_jobs": 0, "longest_job": 0.0, "total_print_time": 0.0, "total_filament": 0.0}}
+        return {
+            "result": {
+                "total_jobs": 0,
+                "longest_job": 0.0,
+                "total_print_time": 0.0,
+                "total_filament": 0.0,
+            }
+        }
 
     @app.get("/machine/update/status")
     async def get_update_status(refresh: str = "false"):
@@ -154,7 +206,6 @@ def register_routes(app: FastAPI):
 
     @app.get("/proxy/debug")
     async def proxy_debug():
-        from state import latest_live_frame, latest_frame_lock, mqtt_client_connected
         with elegoo_status_lock:
             status_cache_copy = dict(elegoo_status_cache)
         with latest_frame_lock:
@@ -165,7 +216,7 @@ def register_routes(app: FastAPI):
             "active_websocket_clients_count": len(active_websocket_clients),
             "latest_frame_size_bytes": frame_size,
             "elegoo_status_cache": status_cache_copy,
-            "mapped_to_moonraker": map_to_moonraker_format()
+            "mapped_to_moonraker": map_to_moonraker_format(),
         }
 
     @app.websocket("/websocket")
@@ -178,7 +229,9 @@ def register_routes(app: FastAPI):
 
         with elegoo_status_lock:
             initial_status = map_to_moonraker_format()
-        await websocket.send_text(json.dumps({"jsonrpc": "2.0", "result": {"status": initial_status}, "id": 1}))
+        await websocket.send_text(
+            json.dumps({"jsonrpc": "2.0", "result": {"status": initial_status}, "id": 1})
+        )
 
         try:
             while True:
@@ -191,36 +244,78 @@ def register_routes(app: FastAPI):
                     if method in ["printer.objects.subscribe", "printer.objects.query"]:
                         with elegoo_status_lock:
                             status_fmt = map_to_moonraker_format()
-                        await websocket.send_text(json.dumps({"jsonrpc": "2.0", "result": {"status": status_fmt}, "id": msg_id}))
+                        await websocket.send_text(
+                            json.dumps(
+                                {"jsonrpc": "2.0", "result": {"status": status_fmt}, "id": msg_id}
+                            )
+                        )
                     elif method == "server.info":
-                        await websocket.send_text(json.dumps({"jsonrpc": "2.0", "result": {"state": "ready", "klippy_state": "ready", "klippy_connected": True}, "id": msg_id}))
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "result": {
+                                        "state": "ready",
+                                        "klippy_state": "ready",
+                                        "klippy_connected": True,
+                                    },
+                                    "id": msg_id,
+                                }
+                            )
+                        )
                     elif method == "printer.info":
                         with elegoo_status_lock:
-                            state = map_to_moonraker_format()["print_stats"]["state"]
-                        await websocket.send_text(json.dumps({
-                            "jsonrpc": "2.0",
-                            "result": {
-                                "state": state,
-                                "state_message": "Printer is ready",
-                                "hostname": "elegoo-cc2",
-                                "software_version": "v0.12.0-proxy",
-                                "cpu_info": "Allwinner R528 Proxy",
-                                "klipper_path": "/home/pi/klipper",
-                                "python_path": "/home/pi/klippy-env/bin/python",
-                                "log_file": "/tmp/klippy.log",
-                                "config_file": "/home/pi/klipper_config/printer.cfg"
-                            },
-                            "id": msg_id
-                        }))
+                            printer_state = map_to_moonraker_format()["print_stats"]["state"]
+                        await websocket.send_text(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "result": {
+                                        "state": printer_state,
+                                        "state_message": "Printer is ready",
+                                        "hostname": "elegoo-cc2",
+                                        "software_version": "v0.12.0-proxy",
+                                        "cpu_info": "Allwinner R528 Proxy",
+                                        "klipper_path": "/home/pi/klipper",
+                                        "python_path": "/home/pi/klippy-env/bin/python",
+                                        "log_file": "/tmp/klippy.log",
+                                        "config_file": "/home/pi/klipper_config/printer.cfg",
+                                    },
+                                    "id": msg_id,
+                                }
+                            )
+                        )
                     elif method == "printer.gcode.script":
-                        from state import SERIAL_NUMBER, CLIENT_ID
                         script = msg.get("params", {}).get("script", "")
                         if script:
-                            cmd = {"id": random.randint(1000, 9999), "method": 1008, "params": {"command": script}}
-                            mqtt_client.publish(f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd))
-                        await websocket.send_text(json.dumps({"jsonrpc": "2.0", "result": "ok", "id": msg_id}))
-                    elif method in ["connection.register_remote_method", "server.connection.identify"]:
-                        await websocket.send_text(json.dumps({"jsonrpc": "2.0", "result": None, "id": msg_id}))
+                            if state.mqtt_client is None:
+                                await websocket.send_text(
+                                    json.dumps({
+                                        "jsonrpc": "2.0",
+                                        "error": {"code": -32603, "message": "MQTT client not ready"},
+                                        "id": msg_id,
+                                    })
+                                )
+                                continue
+                            cmd = {
+                                "id": random.randint(1000, 9999),
+                                "method": 1008,
+                                "params": {"command": script},
+                            }
+                            state.mqtt_client.publish(
+                                f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request",
+                                json.dumps(cmd),
+                            )
+                        await websocket.send_text(
+                            json.dumps({"jsonrpc": "2.0", "result": "ok", "id": msg_id})
+                        )
+                    elif method in [
+                        "connection.register_remote_method",
+                        "server.connection.identify",
+                    ]:
+                        await websocket.send_text(
+                            json.dumps({"jsonrpc": "2.0", "result": None, "id": msg_id})
+                        )
                 except Exception:
                     logger.exception("Error handling WebSocket message")
         except WebSocketDisconnect:
