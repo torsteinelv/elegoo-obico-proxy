@@ -131,6 +131,9 @@ def register_routes(app: FastAPI):
                 "method": 1008,
                 "params": {"command": script},
             }
+            if state.mqtt_client is None:
+                logger.warning("Cannot send gcode script: MQTT client not initialized yet")
+                return {"result": "error", "message": "MQTT client not ready"}
             state.mqtt_client.publish(
                 f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request",
                 json.dumps(cmd),
@@ -139,6 +142,9 @@ def register_routes(app: FastAPI):
 
     @app.post("/printer/print/pause")
     async def print_pause():
+        if state.mqtt_client is None:
+            logger.warning("Cannot pause: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1021, "params": {}}
         state.mqtt_client.publish(
             f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
@@ -147,6 +153,9 @@ def register_routes(app: FastAPI):
 
     @app.post("/printer/print/resume")
     async def print_resume():
+        if state.mqtt_client is None:
+            logger.warning("Cannot resume: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1023, "params": {}}
         state.mqtt_client.publish(
             f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
@@ -155,6 +164,9 @@ def register_routes(app: FastAPI):
 
     @app.post("/printer/print/cancel")
     async def print_cancel():
+        if state.mqtt_client is None:
+            logger.warning("Cannot cancel: MQTT client not initialized yet")
+            return {"result": "error", "message": "MQTT client not ready"}
         cmd = {"id": random.randint(1000, 9999), "method": 1022, "params": {}}
         state.mqtt_client.publish(
             f"elegoo/{SERIAL_NUMBER}/{CLIENT_ID}/api_request", json.dumps(cmd)
