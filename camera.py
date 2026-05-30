@@ -38,8 +38,37 @@ def webcam_stream_cache_worker():
                         logger.info("MJPEG-strøm tilkoblet, leser frames...")
                         buffer = b""
                         frame_count = 0
-                        async for chunk in resp.content.iter_chunked(8192):
+                        last_frame_time = 0.0
+                        chunk_count = 0
+                        while True:
+                            try:
+                                chunk = await resp.content.readany()
+                            except Exception:
+                                break
+                            if not chunk:
+                                # Stream ended (EOF)
+                                logger.info(f"MJPEG-strøm avsluttet (EOF) etter {frame_count} frames, {chunk_count} chunks, buffer_size={len(buffer)}")
+                                break
+                            chunk_count += 1
                             buffer += chunk
+
+                            # Trim buffer to prevent unbounded growth if stream sends
+                            # junk/headers before the first JPEG frame. Keep only data
+                            # from the first SOI marker onward.
+                            first_soi = buffer.find(b"\xff\xd8")
+                            if first_soi == -1:
+                                # No SOI yet — keep only last byte in case it's the
+                                # start of a marker, discard the rest
+                                buffer = buffer[-1:] if buffer.endswith(b"\xff") else b""
+                                soi_count = 0
+                                eoi_count = 0
+                            elif first_soi >= 0:
+                                if first_soi > 0:
+                                    buffer = buffer[first_soi:]
+                                soi_count = buffer.count(b"\xff\xd8")
+                                eoi_count = buffer.count(b"\xff\xd9")
+
+                            frames_this_round = 0
                             while True:
                                 start = buffer.find(b"\xff\xd8")
                                 if start == -1:
@@ -49,11 +78,30 @@ def webcam_stream_cache_worker():
                                     break
                                 frame = buffer[start:end + 2]
                                 buffer = buffer[end + 2:]
+                                frame_size = len(frame)
 
                                 with state.latest_frame_lock:
                                     state.latest_live_frame = frame
                                     state.latest_frame_timestamp = time.time()
+                                    now = time.time()
                                 frame_count += 1
+                                frames_this_round += 1
+
+                                # Log first frame and every 5th frame, or if gap > 2s
+                                if frame_count == 1 or frame_count % 5 == 0 or (now - last_frame_time > 2.0 and frame_count > 1):
+                                    logger.info(f"Frame #{frame_count}: size={frame_size}, buffer_remaining={len(buffer)}, chunk_total={chunk_count}, gap={now - last_frame_time:.1f}s")
+                                    last_frame_time = now
+
+                            if frames_this_round > 0:
+                                logger.debug(f"Chunk #{chunk_count}: found {frames_this_round} frames, buffer={len(buffer)}, SOI={soi_count}, EOI={eoi_count}")
+                            else:
+                                # No frames found — log buffer state periodically
+                                if chunk_count <= 5 or chunk_count % 20 == 0:
+                                    logger.info(f"Chunk #{chunk_count}: no frames found, buffer_size={len(buffer)}, SOI={soi_count}, EOI={eoi_count}")
+                                    # Show first 200 bytes as hex for debugging
+                                    if len(buffer) > 0:
+                                        hex_preview = buffer[:200].hex()
+                                        logger.debug(f"Buffer hex preview: {hex_preview}")
 
                         logger.info(f"Strøm brøt av etter {frame_count} frames. Prøver å koble på nytt...")
                         await asyncio.sleep(3)
