@@ -3,13 +3,19 @@
 Proxyen cacher MJPEG-strøm frå printeren i RAM og serverer bileta
 via HTTP-endepunkt som moonraker-obico kan polla. Dette betyr at
 moonraker-obico aldri stressar printeren direkte.
+
+Dersom printerkameraet ikkje svarer, vert eit simulert bilete med
+klokkeslett generert dynamisk – slik at frontend alltid får noko.
 """
+import io
 import time
 import threading
 import aiohttp
 import asyncio
+from datetime import datetime
 from fastapi import HTTPException
 from fastapi.responses import Response
+from PIL import Image, ImageDraw, ImageFont
 import state
 
 
@@ -111,6 +117,78 @@ def webcam_stream_cache_worker():
     worker_thread.start()
 
 
+# --- Fallback: generer eit bilete med klokkeslett når kameraet ikkje svarer ---
+
+_fallback_image_cache = b""
+_fallback_image_ts = 0.0
+_fallback_image_lock = __import__("threading").RLock()
+
+
+def _generate_fallback_image() -> bytes:
+    """Generer eit enkelt JPEG-bilete med dagens dato/klokkeslett.
+
+    Bildet vert cachet i opptil 1 sekund slik at fleire forespurnader
+    ikkje genererar nye bilete for kvar req — gjev moonraker-obico
+    noko stabilt å polla medan ekte kamera ikkje svarer.
+    """
+    global _fallback_image_cache, _fallback_image_ts
+
+    now = time.time()
+    with _fallback_image_lock:
+        if _fallback_image_cache and now - _fallback_image_ts < 1.0:
+            return _fallback_image_cache
+
+    # Lag nytt bilete
+    width, height = 640, 480
+    img = Image.new("RGB", (width, height), "#1a1a2e")
+    draw = ImageDraw.Draw(img)
+
+    tid = datetime.now().strftime("%H:%M:%S")
+    dato = datetime.now().strftime("%Y-%m-%d")
+
+    # Prøv å finne ei fin font, elles fall tilbake til standard
+    font = None
+    for fpath in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+    ]:
+        try:
+            font = ImageFont.truetype(fpath, 36)
+            break
+        except OSError:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Sentrer tekst
+    bbox = draw.textbbox((0, 0), tid, font=font)
+    tw = bbox[2] - bbox[0]
+    dx = (width - tw) // 2
+    dy = height // 2 - 50
+    draw.text((dx, dy), tid, fill="#ffffff", font=font)
+
+    # Dato under
+    draw.text((dx, dy + 50), dato, fill="#aaaaaa", font=font)
+
+    # "PROXY FALLBACK"-badge hjørne
+    badge = "PROXY FALLBACK"
+    bb = draw.textbbox((0, 0), badge, font=font)
+    bw = bb[2] - bb[0]
+    draw.rectangle([width - bw - 10, 10, width - 10, 10 + 36], fill="#e74c3c")
+    draw.text((width - bw - 10, 10), badge, fill="#ffffff", font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    jpeg_bytes = buf.getvalue()
+
+    with _fallback_image_lock:
+        _fallback_image_cache = jpeg_bytes
+        _fallback_image_ts = now
+
+    return jpeg_bytes
+
+
 # --- HTTP-endepunkt ---
 def register_camera_routes(app):
     """Registrer kamera-relaterte HTTP-endepunkt på FastAPI-appen."""
@@ -170,7 +248,7 @@ def register_camera_routes(app):
 
     @app.get("/camera/snapshot")
     async def camera_snapshot():
-        """Serverer det ferskeste bildet frå cache."""
+        """Serverer det ferskeste bildet frå cache, eller fallback-bilete."""
         with state.latest_frame_lock:
             frame = state.latest_live_frame
 
@@ -184,14 +262,21 @@ def register_camera_routes(app):
                     "Expires": "0"
                 }
             )
-        raise HTTPException(
-            status_code=503,
-            detail="Kamera-cache er ikkje klar ennå. Vent litt og prøv på nytt."
+
+        # Ingen ekte frame ennå — gi moonraker-obico noko å polla
+        return Response(
+            content=_generate_fallback_image(),
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
         )
 
     @app.get("/camera/stream")
     async def camera_stream():
-        """Serverer det ferskeste bildet frå cache.
+        """Serverer det ferskeste bildet frå cache, eller fallback-bilete.
 
         moonraker-obico pollar /camera/snapshot kontinuerleg for WebRTC-streaming.
         /camera/stream blir òg vist i frontend der ein treng bilde.
@@ -214,7 +299,14 @@ def register_camera_routes(app):
                     "X-Frame-Age": f"{age:.1f}"
                 }
             )
-        raise HTTPException(
-            status_code=503,
-            detail="Kamera-cache er ikkje klar ennå. Vent litt og prøv på nytt."
+
+        # Ingen ekte frame ennå — gi noko å polla
+        return Response(
+            content=_generate_fallback_image(),
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
         )
