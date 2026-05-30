@@ -52,9 +52,20 @@ def webcam_stream_cache_worker():
                             chunk_count += 1
                             buffer += chunk
 
-                            # Count JPEG start markers in buffer
-                            soi_count = buffer.count(b"\xff\xd8")
-                            eoi_count = buffer.count(b"\xff\xd9")
+                            # Trim buffer to prevent unbounded growth if stream sends
+                            # junk/headers before the first JPEG frame. Keep only data
+                            # from the first SOI marker onward.
+                            first_soi = buffer.find(b"\xff\xd8")
+                            if first_soi == -1:
+                                # No SOI yet — keep only last byte in case it's the
+                                # start of a marker, discard the rest
+                                buffer = buffer[-1:] if buffer.endswith(b"\xff") else b""
+                                soi_count = 0
+                                eoi_count = 0
+                            elif first_soi > 0:
+                                buffer = buffer[first_soi:]
+                                soi_count = buffer.count(b"\xff\xd8")
+                                eoi_count = buffer.count(b"\xff\xd9")
 
                             frames_this_round = 0
                             while True:
