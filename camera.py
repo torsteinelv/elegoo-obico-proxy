@@ -62,8 +62,9 @@ def webcam_stream_cache_worker():
                                 buffer = buffer[-1:] if buffer.endswith(b"\xff") else b""
                                 soi_count = 0
                                 eoi_count = 0
-                            elif first_soi > 0:
-                                buffer = buffer[first_soi:]
+                            elif first_soi >= 0:
+                                if first_soi > 0:
+                                    buffer = buffer[first_soi:]
                                 soi_count = buffer.count(b"\xff\xd8")
                                 eoi_count = buffer.count(b"\xff\xd9")
 
